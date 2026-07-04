@@ -1,0 +1,1201 @@
+# Inherited from Lich5/lich5-gtk3-gems (2026-06-14) as the seed for the Ruby4Lich5
+# "front door" (Phase 2 of ROADMAP-woven-plan.md): a fixed monolithic build of one named
+# suite (GTK3), to be generalized into "name any gem -> classify -> build -> publish".
+# Not yet refactored. Known stale spot: the glib2-gc-repair input below still assumes the
+# old cache-ruby-property-setter-values patch approach, which the 2026-07-03 GC.compact
+# fix in lich5-gtk3-gems (rb-gi-loader.c) replaces with rb_gc_register_mark_object.
+name: Build Ruby4 Bundled Gems Suite
+
+on:
+  workflow_dispatch:
+    inputs:
+      ruby-installer-version:
+        description: "RubyInstaller UCRT archive version, for example 4.0.5-1."
+        required: false
+        default: "4.0.5-1"
+      ruby-gnome-version:
+        description: "Ruby-GNOME suite version to build from upstream source."
+        required: false
+        default: "4.3.6"
+      cairo-version:
+        description: "rcairo version to build from upstream gem source."
+        required: false
+        default: "1.18.5"
+      glib2-gc-repair:
+        description: "Optional glib2 patch for Ruby-defined GObject property retention."
+        required: false
+        default: "cache-ruby-property-setter-values"
+        type: choice
+        options:
+          - "cache-ruby-property-setter-values"
+          - "none"
+      runtime-gems:
+        description: "Top-level Lich runtime gems to install from the staged local bundle."
+        required: false
+        default: "gtk3 sqlite3 ox ascii_charts curses os redis sequel set terminal-table kramdown tzinfo tzinfo-data concurrent-ruby ffi webrick"
+      native-runtime-gems:
+        description: "Runtime gems that must be collected as x64-mingw-ucrt binary gems."
+        required: false
+        default: "sqlite3 ox ffi curses"
+      diagnostic-mkmf-logs:
+        description: "Dump mkmf.log files when native compilation fails."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build_ruby4_bundled_gems_suite:
+    name: Build Ruby4 bundled gems suite (windows-ucrt64)
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    env:
+      MSYSTEM: UCRT64
+      MSYS2_PREFIX: ucrt64
+      MSYS2_PACKAGE_PREFIX: mingw-w64-ucrt-x86_64
+      GEM_PLATFORM: x64-mingw-ucrt
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Validate inputs
+        shell: powershell
+        run: |
+          $rubyInstallerVersion = '${{ inputs.ruby-installer-version }}'
+          $rubyGnomeVersion = '${{ inputs.ruby-gnome-version }}'
+          $cairoVersion = '${{ inputs.cairo-version }}'
+          $glib2GcRepair = '${{ inputs.glib2-gc-repair }}'
+          $runtimeGems = '${{ inputs.runtime-gems }}'
+          $nativeRuntimeGems = '${{ inputs.native-runtime-gems }}'
+          $diagnosticMkmfLogs = '${{ inputs.diagnostic-mkmf-logs }}'
+
+          if ($rubyInstallerVersion -notmatch '^\d+\.\d+\.\d+-\d+$') {
+            Write-Error "ruby-installer-version must look like N.N.N-N, for example 4.0.5-1; received '$rubyInstallerVersion'."
+            exit 1
+          }
+          if ($rubyGnomeVersion -notmatch '^\d+\.\d+\.\d+$') {
+            Write-Error "ruby-gnome-version must look like N.N.N; received '$rubyGnomeVersion'."
+            exit 1
+          }
+          if ($cairoVersion -notmatch '^\d+\.\d+\.\d+$') {
+            Write-Error "cairo-version must look like N.N.N; received '$cairoVersion'."
+            exit 1
+          }
+          if ($glib2GcRepair -notin @('cache-ruby-property-setter-values', 'none')) {
+            Write-Error "glib2-gc-repair must be 'cache-ruby-property-setter-values' or 'none'; received '$glib2GcRepair'."
+            exit 1
+          }
+          if ([string]::IsNullOrWhiteSpace($runtimeGems)) {
+            Write-Error "runtime-gems must list at least one top-level runtime gem."
+            exit 1
+          }
+          if ([string]::IsNullOrWhiteSpace($nativeRuntimeGems)) {
+            Write-Error "native-runtime-gems must list at least one native runtime gem."
+            exit 1
+          }
+          if ($diagnosticMkmfLogs -notin @('true', 'false')) {
+            Write-Error "diagnostic-mkmf-logs must be true or false; received '$diagnosticMkmfLogs'."
+            exit 1
+          }
+
+          "RUBY_INSTALLER_VERSION=$rubyInstallerVersion" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RUBY_GNOME_VERSION=$rubyGnomeVersion" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "CAIRO_VERSION=$cairoVersion" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "GLIB2_GC_REPAIR=$glib2GcRepair" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RUNTIME_GEMS=$runtimeGems" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "NATIVE_RUNTIME_GEMS=$nativeRuntimeGems" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "DIAGNOSTIC_MKMF_LOGS=$diagnosticMkmfLogs" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Single source of truth for the MSYS2/MinGW toolchain. The whole job
+      # is keyed off this install via steps.msys2.outputs.msys2-location, so
+      # there is no second pacman pass into a separate C:\msys64 root.
+      - name: Install MSYS2 UCRT build surface
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            base-devel
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc-libs
+            mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-libffi
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-gobject-introspection
+            mingw-w64-ucrt-x86_64-gobject-introspection-runtime
+            mingw-w64-ucrt-x86_64-gtk3
+            mingw-w64-ucrt-x86_64-pdcurses
+            mingw-w64-ucrt-x86_64-ncurses
+
+      - name: Build sanitized PATH
+        id: lanepath
+        shell: powershell
+        run: |
+          # Resolve the MSYS2 root from the setup-msys2 install (its own
+          # location, not the runner's preinstalled C:\msys64). Everything
+          # downstream keys off MSYS2_ROOT, so this is the single root.
+          $msys = '${{ steps.msys2.outputs.msys2-location }}'
+          $prefix = $env:MSYS2_PREFIX
+          if ([string]::IsNullOrWhiteSpace($msys) -or !(Test-Path $msys)) {
+            Write-Error "MSYS2 setup failed: expected install root at '$msys' to exist."
+            exit 1
+          }
+
+          $orig = $env:Path -split ';'
+          $filtered = $orig | Where-Object {
+            $_ -and
+            ($_ -notlike '*\Ruby\*\x64\msys64\*') -and
+            ($_ -notmatch '^C:\\hostedtoolcache\\windows\\Ruby(\\|$)') -and
+            ($_ -ne 'C:\mingw64\bin') -and
+            ($_ -notmatch '^C:\\Strawberry(\\|$)')
+          }
+          $lanePath = @("$msys\$prefix\bin", "$msys\usr\bin") + $filtered
+          $joined = ($lanePath -join ';')
+
+          "MSYS2_ROOT=$msys" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "PATH_GEM_SUITE=$joined" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "path=$joined" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "RI_DEVKIT=$msys" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "MSYSTEM_PREFIX=/$prefix" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "MINGW_PREFIX=/$prefix" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Resolve native build surface
+        shell: powershell
+        env:
+          PATH: ${{ steps.lanepath.outputs.path }}
+        run: |
+          $msys = $env:MSYS2_ROOT
+          $prefix = $env:MSYS2_PREFIX
+          $gcc = Join-Path $msys "$prefix\bin\gcc.exe"
+          $pkgConfig = Join-Path $msys "$prefix\bin\pkg-config.exe"
+          $pkgConfigPath = "$msys\$prefix\lib\pkgconfig;$msys\lib\pkgconfig"
+
+          # GNU make ships in the MSYS lane as usr\bin\make.exe; the UCRT
+          # package provides ucrt64\bin\mingw32-make.exe (a different name).
+          # There is no ucrt64\bin\make.exe. Prefer the MSYS make for mkmf
+          # compatibility and fall back to mingw32-make.
+          $makeCandidates = @(
+            (Join-Path $msys 'usr\bin\make.exe'),
+            (Join-Path $msys "$prefix\bin\mingw32-make.exe")
+          )
+          $make = $makeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          # mkmf/gem-install spawns make through MSYS sh, which strips
+          # backslashes (D:\a\_temp -> D:a_temp). Use forward slashes so the
+          # path survives; make and Windows CreateProcess both accept them.
+          if ($make) { $make = $make -replace '\\', '/' }
+
+          # Probe the surface before gating so a failure shows what is present.
+          Write-Host "::group::Native build surface probe"
+          where.exe gcc
+          where.exe make
+          where.exe mingw32-make
+          where.exe pkg-config
+          Write-Host "::endgroup::"
+
+          # Validate the whole surface at once and report every gap together.
+          $required = [ordered]@{ gcc = $gcc; make = $make; 'pkg-config' = $pkgConfig }
+          $missing = @()
+          foreach ($name in $required.Keys) {
+            $path = $required[$name]
+            if ([string]::IsNullOrEmpty($path) -or !(Test-Path $path)) {
+              $missing += $name
+            }
+          }
+          if ($missing.Count -gt 0) {
+            $missingList = $missing -join ', '
+            $searched = "Searched gcc=$gcc; make=$($makeCandidates -join ' | '); pkg-config=$pkgConfig."
+            Write-Error "Native build surface validation failed: missing tool(s): $missingList. $searched"
+            exit 1
+          }
+
+          "CC=$gcc" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "MAKE=$make" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "PKG_CONFIG=$pkgConfig" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "PKG_CONFIG_PATH=$pkgConfigPath" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          Write-Host "::group::Native build surface"
+          Write-Host "CC=$gcc"
+          Write-Host "MAKE=$make"
+          Write-Host "PKG_CONFIG=$pkgConfig"
+          Write-Host "PKG_CONFIG_PATH=$pkgConfigPath"
+          & $gcc --version
+          & $make --version
+          & $pkgConfig --version
+          & $pkgConfig --modversion gtk+-3.0 gobject-introspection-1.0 glib-2.0 gobject-2.0 gio-2.0 cairo pango
+          Write-Host "::endgroup::"
+
+      - name: Download and extract RubyInstaller
+        shell: powershell
+        run: |
+          $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION
+          $rubyParent = 'C:\Ruby4Lich5\ruby'
+          $archive = Join-Path $env:RUNNER_TEMP "rubyinstaller-$rubyInstallerVersion-x64.7z"
+          $url = "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-$rubyInstallerVersion/rubyinstaller-$rubyInstallerVersion-x64.7z"
+
+          if (Test-Path $rubyParent) {
+            Remove-Item $rubyParent -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $rubyParent -Force | Out-Null
+
+          Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
+          if (!(Test-Path $archive)) {
+            Write-Error "RubyInstaller download failed: expected archive $archive was not created."
+            exit 1
+          }
+
+          $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
+          if (!(Test-Path $sevenZip)) {
+            $sevenZip = '7z.exe'
+          }
+
+          & $sevenZip x $archive "-o$rubyParent" -y
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "RubyInstaller extraction failed."
+            exit $LASTEXITCODE
+          }
+
+          $rubyExe = Get-ChildItem $rubyParent -Recurse -Filter ruby.exe -File | Where-Object {
+            $_.FullName -match '\\bin\\ruby\.exe$'
+          } | Select-Object -First 1
+          if (-not $rubyExe) {
+            Write-Error "RubyInstaller extraction failed: ruby.exe was not found under $rubyParent."
+            exit 1
+          }
+
+          $rubyRoot = Split-Path (Split-Path $rubyExe.FullName -Parent) -Parent
+          & $rubyExe.FullName --version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "RubyInstaller validation failed: ruby.exe could not run."
+            exit $LASTEXITCODE
+          }
+
+          $rubyPlatform = & $rubyExe.FullName -e "require 'rubygems'; print Gem::Platform.local.to_s"
+          if ($rubyPlatform -ne $env:GEM_PLATFORM) {
+            Write-Error "RubyInstaller validation failed: expected Ruby platform $env:GEM_PLATFORM, got $rubyPlatform."
+            exit 1
+          }
+
+          $gemExe = Join-Path $rubyRoot 'bin\gem.cmd'
+          if (!(Test-Path $gemExe)) {
+            Write-Error "RubyInstaller validation failed: gem.cmd was not found at $gemExe."
+            exit 1
+          }
+
+          "RUBY_ROOT=$rubyRoot" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RUBY_EXE=$($rubyExe.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "GEM_EXE=$gemExe" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Download upstream gem sources
+        shell: powershell
+        env:
+          PATH: ${{ steps.lanepath.outputs.path }}
+        run: |
+          $rubyGnomeVersion = $env:RUBY_GNOME_VERSION
+          $cairoVersion = $env:CAIRO_VERSION
+          $work = Join-Path $env:RUNNER_TEMP 'ruby4-bundled-gems'
+          $src = Join-Path $work 'src'
+          $build = Join-Path $work 'build'
+          $pkg = Join-Path $env:GITHUB_WORKSPACE 'pkg'
+
+          foreach ($dir in @($work, $pkg)) {
+            if (Test-Path $dir) {
+              Remove-Item $dir -Recurse -Force
+            }
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          }
+          New-Item -ItemType Directory -Path $src, $build -Force | Out-Null
+
+          $rubyGnomeZip = Join-Path $src "ruby-gnome-$rubyGnomeVersion.zip"
+          $rubyGnomeUrl = "https://github.com/ruby-gnome/ruby-gnome/archive/refs/tags/$rubyGnomeVersion.zip"
+          Write-Host "Downloading Ruby-GNOME $rubyGnomeVersion from $rubyGnomeUrl"
+          Invoke-WebRequest -Uri $rubyGnomeUrl -OutFile $rubyGnomeZip -UseBasicParsing
+          Expand-Archive -Path $rubyGnomeZip -DestinationPath $src -Force
+          $rubyGnomeRoot = Join-Path $src "ruby-gnome-$rubyGnomeVersion"
+          if (!(Test-Path $rubyGnomeRoot)) {
+            Write-Error "Source download failed: Ruby-GNOME source did not expand to $rubyGnomeRoot."
+            exit 1
+          }
+
+          Push-Location $src
+          & $env:GEM_EXE fetch cairo --version $cairoVersion --clear-sources --source https://rubygems.org
+          $fetchExit = $LASTEXITCODE
+          Pop-Location
+          $cairoGem = Join-Path $src "cairo-$cairoVersion.gem"
+          if ($fetchExit -ne 0 -or !(Test-Path $cairoGem)) {
+            Write-Error "Source download failed: cairo $cairoVersion gem could not be fetched."
+            exit 1
+          }
+          Push-Location $src
+          & $env:GEM_EXE unpack $cairoGem
+          $unpackExit = $LASTEXITCODE
+          Pop-Location
+          if ($unpackExit -ne 0) {
+            Write-Error "Source download failed: cairo $cairoVersion gem could not be unpacked."
+            exit $unpackExit
+          }
+          $cairoRoot = Join-Path $src "cairo-$cairoVersion"
+          if (!(Test-Path $cairoRoot)) {
+            Write-Error "Source download failed: cairo source did not unpack to $cairoRoot."
+            exit 1
+          }
+
+          "SOURCE_ROOT=$build" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "PKG_DIR=$pkg" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          $rubyGnomeGems = @(
+            'glib2',
+            'gobject-introspection',
+            'gio2',
+            'cairo-gobject',
+            'pango',
+            'gdk_pixbuf2',
+            'atk',
+            'gdk3',
+            'gtk3'
+          )
+          foreach ($gemName in $rubyGnomeGems) {
+            $from = Join-Path $rubyGnomeRoot $gemName
+            $to = Join-Path $build $gemName
+            if (!(Test-Path $from)) {
+              Write-Error "Source download failed: missing Ruby-GNOME gem source $from."
+              exit 1
+            }
+            Copy-Item $from $to -Recurse -Force
+          }
+          Copy-Item $cairoRoot (Join-Path $build 'cairo') -Recurse -Force
+
+          $sourceGemPackages = @{
+            'cairo' = $cairoGem
+          }
+          foreach ($gemName in $sourceGemPackages.Keys) {
+            $gemDir = Join-Path $build $gemName
+            $gemspec = Join-Path $gemDir "$gemName.gemspec"
+            if (Test-Path $gemspec) {
+              Write-Host "Source normalization: $gemName already provides $gemspec"
+              continue
+            }
+
+            $gemPackage = $sourceGemPackages[$gemName]
+            if (!(Test-Path $gemPackage)) {
+              Write-Error "Source normalization failed: fetched gem package for $gemName is missing at $gemPackage."
+              exit 1
+            }
+            if (!(Test-Path $gemDir)) {
+              Write-Error "Source normalization failed: source directory for $gemName is missing at $gemDir."
+              exit 1
+            }
+
+            $normalizeScript = @(
+              'require "rubygems/package"',
+              'gem_package, gemspec_path = ARGV',
+              'spec = Gem::Package.new(gem_package).spec',
+              'File.write(gemspec_path, spec.to_ruby)'
+            ) -join "`n"
+            $normalizeScriptPath = Join-Path $env:RUNNER_TEMP "normalize-$gemName-gemspec.rb"
+            Set-Content -Path $normalizeScriptPath -Value $normalizeScript -Encoding ascii
+            & $env:RUBY_EXE $normalizeScriptPath $gemPackage $gemspec
+            if ($LASTEXITCODE -ne 0 -or !(Test-Path $gemspec)) {
+              Write-Error "Source normalization failed: could not generate $gemspec from $gemPackage."
+              exit 1
+            }
+            Write-Host "Source normalization: generated $gemspec from $gemPackage"
+          }
+
+      - name: Patch upstream sources for Ruby4 binary gems
+        shell: powershell
+        env:
+          PATH: ${{ steps.lanepath.outputs.path }}
+        run: |
+          $sourceRoot = $env:SOURCE_ROOT
+          $platform = $env:GEM_PLATFORM
+          $rubyGnomeVersion = $env:RUBY_GNOME_VERSION
+          $cairoVersion = $env:CAIRO_VERSION
+
+          function Read-Text([string] $path) {
+            Get-Content $path -Raw
+          }
+
+          function Write-Text([string] $path, [string] $content) {
+            Set-Content -Path $path -Value $content -Encoding ascii
+          }
+
+          function Patch-Gemspec([string] $gemName) {
+            $gemspec = Join-Path $sourceRoot "$gemName\$gemName.gemspec"
+            if (!(Test-Path $gemspec)) {
+              Write-Error "Patch failed: gemspec not found for $gemName at $gemspec."
+              exit 1
+            }
+            $content = Read-Text $gemspec
+            $content = $content -replace '(?m)^\s*s\.extensions\s*=.*\r?\n', ''
+            # Strip build-only deps regardless of gemspec format. Source-ZIP gems
+            # write s.add_runtime_dependency("pkg-config", ...), but gem-unpacked
+            # ones (cairo) write the serialized %q<pkg-config> form, so match both.
+            $content = $content -replace '(?m)^.*add_runtime_dependency.*pkg-config.*\r?\n', ''
+            $content = $content -replace '(?m)^.*add_runtime_dependency.*native-package-installer.*\r?\n', ''
+            if ($gemName -eq 'cairo') {
+              $content = $content.Replace('1.18.4', $cairoVersion)
+              $content = $content -replace '= 4\.3\.\d+', "= $rubyGnomeVersion"
+            }
+            if ($content -notmatch 's\.platform\s*=') {
+              $content = $content -replace '(s\.version\s*=.*\r?\n)', "`$1  s.platform      = Gem::Platform.new('$platform')`n"
+            }
+            if ($content -notmatch 'Dir\.glob\("lib/\*\*/\*\.so"\)') {
+              $content = $content -replace '(?m)^end\s*$', "  s.files += Dir.glob(`"lib/**/*.so`")`n  s.files += Dir.glob(`"vendor/**/*`")`nend"
+            }
+            Write-Text $gemspec $content
+          }
+
+          function Insert-Before([string] $path, [string] $needle, [string] $insert) {
+            $content = Read-Text $path
+            if ($content.Contains($insert.Trim())) {
+              return
+            }
+            if (-not $content.Contains($needle)) {
+              Write-Error "Patch failed: expected anchor not found in $path`: $needle"
+              exit 1
+            }
+            Write-Text $path $content.Replace($needle, "$insert`n$needle")
+          }
+
+          function Replace-Required([string] $path, [string] $pattern, [string] $replacement, [string] $description) {
+            $content = Read-Text $path
+            $updated = $content -replace $pattern, $replacement
+            if ($updated -eq $content) {
+              Write-Error "Patch failed: expected $description was not found in $path."
+              exit 1
+            }
+            Write-Text $path $updated
+          }
+
+          foreach ($gemName in @('glib2', 'gobject-introspection', 'gio2', 'cairo', 'cairo-gobject', 'pango', 'gdk_pixbuf2', 'atk', 'gdk3', 'gtk3')) {
+            Patch-Gemspec $gemName
+          }
+
+          $glib2 = Join-Path $sourceRoot 'glib2\lib\glib2.rb'
+          $glib2Insert = @(
+            'base_dir = Pathname.new(__FILE__).dirname.dirname.expand_path',
+            'vendor_dir = base_dir + "vendor" + "local"',
+            'GLib.prepend_dll_path(vendor_dir + "bin")',
+            'major, minor, _ = RUBY_VERSION.split(/\./)'
+          ) -join "`n"
+          Insert-Before $glib2 'require "glib2.so"' $glib2Insert
+          $glib2Content = Read-Text $glib2
+          $glib2Content = $glib2Content -replace 'require\s+"glib2\.so"', 'require "glib2/#{major}.#{minor}/glib2.so"'
+          Write-Text $glib2 $glib2Content
+
+          $cairo = Join-Path $sourceRoot 'cairo\lib\cairo.rb'
+          $cairoInsert = @(
+            'if RUBY_PLATFORM =~ /mingw|mswin/',
+            '  require "pathname"',
+            '  base_dir = Pathname.new(__FILE__).dirname.dirname.expand_path',
+            '  vendor_bin = base_dir + "vendor" + "local" + "bin"',
+            '  if vendor_bin.exist?',
+            '    begin',
+            '      require "ruby_installer/runtime"',
+            '      RubyInstaller::Runtime.add_dll_directory(vendor_bin.to_s)',
+            '    rescue LoadError',
+            '      ENV["PATH"] = "#{vendor_bin};#{ENV["PATH"]}"',
+            '    end',
+            '  end',
+            'end',
+            'major, minor, _ = RUBY_VERSION.split(/\./)'
+          ) -join "`n"
+          Insert-Before $cairo 'require "cairo.so"' $cairoInsert
+          $cairoContent = Read-Text $cairo
+          $cairoContent = $cairoContent -replace 'require\s+"cairo\.so"', 'require "cairo/#{major}.#{minor}/cairo.so"'
+          Write-Text $cairo $cairoContent
+
+          $gi = Join-Path $sourceRoot 'gobject-introspection\lib\gobject-introspection.rb'
+          $giInsert = @(
+            'base_dir = Pathname.new(__FILE__).dirname.dirname.expand_path',
+            'vendor_dir = base_dir + "vendor" + "local"',
+            'GLib.prepend_dll_path(vendor_dir + "bin")',
+            '',
+            'fontconfig_path = vendor_dir + "etc" + "fonts"',
+            'fonts_conf = fontconfig_path + "fonts.conf"',
+            'if fontconfig_path.exist? && fonts_conf.exist?',
+            '  ENV["FONTCONFIG_PATH"] = fontconfig_path.to_s',
+            '  ENV["FONTCONFIG_FILE"] = fonts_conf.to_s',
+            'end',
+            '',
+            'major, minor, _ = RUBY_VERSION.split(/\./)'
+          ) -join "`n"
+          Insert-Before $gi 'require "gobject_introspection.so"' $giInsert
+          Replace-Required $gi 'require\s+"gobject_introspection\.so"' 'require "gobject-introspection/#{major}.#{minor}/gobject_introspection.so"' 'gobject-introspection native extension require'
+          $giContent = Read-Text $gi
+          $giContent = $giContent -replace 'GObjectIntrospection\.prepend_typelib_path\(([^)]*)\)', 'GObjectIntrospection.prepend_typelib_path(vendor_dir + "lib" + "girepository-1.0")'
+          Write-Text $gi $giContent
+
+          $giPlugin = @(
+            'if Gem.win_platform?',
+            '  gi_spec = Gem::Specification.find_by_name("gobject-introspection") rescue nil',
+            '  if gi_spec',
+            '    vendor_dir = File.join(gi_spec.gem_dir, "vendor", "local")',
+            '    fontconfig_file = File.join(vendor_dir, "etc", "fonts", "fonts.conf")',
+            '    if File.exist?(fontconfig_file)',
+            '      ENV["FONTCONFIG_FILE"] = fontconfig_file',
+            '      ENV["FONTCONFIG_PATH"] = File.dirname(fontconfig_file)',
+            '    end',
+            '',
+            '    pixbuf_dir = File.join(vendor_dir, "lib", "gdk-pixbuf-2.0", "2.10.0")',
+            '    loaders_dir = File.join(pixbuf_dir, "loaders")',
+            '    cache_template = File.join(pixbuf_dir, "loaders.cache.in")',
+            '    cache_file = File.join(pixbuf_dir, "loaders.cache")',
+            '    if File.exist?(cache_template) && File.directory?(loaders_dir)',
+            '      template = File.read(cache_template)',
+            '      File.write(cache_file, template.gsub("@@MODULEDIR@@", loaders_dir.gsub("/", "\\")))',
+            '      ENV["GDK_PIXBUF_MODULE_FILE"] = cache_file if File.exist?(cache_file)',
+            '    end',
+            '  end',
+            'end'
+          ) -join "`n"
+          Write-Text (Join-Path $sourceRoot 'gobject-introspection\lib\rubygems_plugin.rb') $giPlugin
+
+          foreach ($loaderPath in @(
+            (Join-Path $sourceRoot 'gio2\lib\gio2\loader.rb'),
+            (Join-Path $sourceRoot 'pango\lib\pango\loader.rb'),
+            (Join-Path $sourceRoot 'gtk3\lib\gtk3\loader.rb')
+          )) {
+            if (!(Test-Path $loaderPath)) {
+              continue
+            }
+            $loader = Read-Text $loaderPath
+            # loader.rb lives at <gem>/lib/<gem>/loader.rb, so the gem name is
+            # the leaf of its immediate parent dir (one -Parent, not two — two
+            # yields "lib", so the require "<gem>.so" rewrite never matches).
+            $gemName = Split-Path (Split-Path $loaderPath -Parent) -Leaf
+            $moduleName = $gemName
+            $prepend = @(
+              '      base_dir = Pathname.new(__FILE__).dirname.dirname.dirname.expand_path',
+              '      vendor_dir = base_dir + "vendor" + "local"',
+              '      GLib.prepend_dll_path(vendor_dir + "bin")',
+              '      major, minor, _ = RUBY_VERSION.split(/\./)'
+            ) -join "`n"
+            $loader = $loader -replace "require\s+`"$gemName\.so`"", "$prepend`n      require `"$gemName/#{major}.#{minor}/$moduleName.so`""
+            Write-Text $loaderPath $loader
+          }
+
+          $cairoGObject = Join-Path $sourceRoot 'cairo-gobject\lib\cairo-gobject.rb'
+          Replace-Required $cairoGObject 'require\s+"cairo_gobject\.so"' ('major, minor, _ = RUBY_VERSION.split(/\./)' + "`n" + 'require "cairo-gobject/#{major}.#{minor}/cairo_gobject.so"') 'cairo-gobject native extension require'
+
+          if ($env:GLIB2_GC_REPAIR -eq 'cache-ruby-property-setter-values') {
+            $objectSource = Join-Path $sourceRoot 'glib2\ext\glib2\rbgobj_object.c'
+            $old = '    rb_funcall(GOBJ2RVAL(object), ruby_setter, 1, GVAL2RVAL(value));'
+            $new = @(
+              '    {',
+              '        VALUE rb_object = GOBJ2RVAL(object);',
+              '        VALUE rb_value = GVAL2RVAL(value);',
+              '        rb_funcall(rb_object, ruby_setter, 1, rb_value);',
+              '        if (G_TYPE_IS_OBJECT(G_PARAM_SPEC_VALUE_TYPE(pspec))) {',
+              '            G_CHILD_SET(rb_object, rb_intern(g_param_spec_get_name(pspec)), rb_value);',
+              '        }',
+              '    }'
+            ) -join "`n"
+            $content = Read-Text $objectSource
+            if (-not $content.Contains($old)) {
+              Write-Error "glib2 GC repair patch failed: patch anchor was not found in $objectSource."
+              exit 1
+            }
+            Write-Text $objectSource $content.Replace($old, $new.TrimEnd())
+          }
+
+      - name: Build GTK3 binary gem suite
+        shell: powershell
+        env:
+          PATH: ${{ steps.lanepath.outputs.path }}
+        run: |
+          $msys = $env:MSYS2_ROOT
+          $prefix = $env:MSYS2_PREFIX
+          $rubyRoot = $env:RUBY_ROOT
+          $rubyExe = $env:RUBY_EXE
+          $gemExe = $env:GEM_EXE
+          $sourceRoot = $env:SOURCE_ROOT
+          $pkgDir = $env:PKG_DIR
+          $harnessRoot = Join-Path $env:RUNNER_TEMP 'ruby4-bundled-gems\harness'
+          $harnessGems = Join-Path $harnessRoot 'gems'
+          if (Test-Path $harnessRoot) {
+            Remove-Item $harnessRoot -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $harnessGems -Force | Out-Null
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'Rakefile') $harnessRoot -Force
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'scripts') (Join-Path $harnessRoot 'scripts') -Recurse -Force
+          Copy-Item (Join-Path $sourceRoot '*') $harnessGems -Recurse -Force
+          $sourceRoot = $harnessGems
+
+          $env:Path = "$rubyRoot\bin;$msys\$prefix\bin;$msys\usr\bin;$env:Path"
+          $env:RI_DEVKIT = $msys
+          $env:MSYSTEM_PREFIX = "/$prefix"
+          $env:MINGW_PREFIX = "/$prefix"
+          $env:CC = Join-Path $msys "$prefix\bin\gcc.exe"
+          # GNU make is usr\bin\make.exe; UCRT provides mingw32-make.exe.
+          # Match the resolution used in "Resolve native build surface", with
+          # forward slashes so the path survives MSYS sh during gem builds.
+          if (Test-Path "$msys\usr\bin\make.exe") {
+            $env:MAKE = "$msys\usr\bin\make.exe"
+          } else {
+            $env:MAKE = "$msys\$prefix\bin\mingw32-make.exe"
+          }
+          $env:MAKE = $env:MAKE -replace '\\', '/'
+          $env:PKG_CONFIG = Join-Path $msys "$prefix\bin\pkg-config.exe"
+          $env:PKG_CONFIG_PATH = "$msys\$prefix\lib\pkgconfig;$msys\lib\pkgconfig"
+          $env:RCAIRO_SOURCE_DIR = Join-Path $sourceRoot 'cairo'
+          $env:BINARY_GEM = 'true'
+          $env:KEEP_BUILT_EXTENSIONS = 'true'
+
+          Write-Host "::group::GTK3 native build preflight"
+          Write-Host "RUBY_EXE=$rubyExe"
+          Write-Host "CC=$env:CC"
+          Write-Host "MAKE=$env:MAKE"
+          Write-Host "PKG_CONFIG=$env:PKG_CONFIG"
+          Write-Host "PKG_CONFIG_PATH=$env:PKG_CONFIG_PATH"
+          where.exe ruby
+          where.exe gcc
+          where.exe make
+          where.exe pkg-config
+          & $rubyExe -rrbconfig -e 'puts "RbConfig CC=#{RbConfig::CONFIG[''CC'']}"; puts "RbConfig LDSHARED=#{RbConfig::CONFIG[''LDSHARED'']}"; puts "RbConfig CFLAGS=#{RbConfig::CONFIG[''CFLAGS'']}"'
+          & $env:PKG_CONFIG --modversion gtk+-3.0 gobject-introspection-1.0 glib-2.0 gobject-2.0 gio-2.0 cairo pango
+          Write-Host "::endgroup::"
+
+          & $gemExe install rake pkg-config native-package-installer
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Build failed: prerequisite build gems could not install."
+            exit $LASTEXITCODE
+          }
+
+          $probeDir = Join-Path $env:RUNNER_TEMP 'ruby4-bundled-gems\mkmf-probe'
+          if (Test-Path $probeDir) {
+            Remove-Item $probeDir -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $probeDir -Force | Out-Null
+          $probeScript = Join-Path $probeDir 'probe.rb'
+          @(
+            'require "mkmf"',
+            'abort("mkmf compile probe failed") unless try_compile("int main(void) { return 0; }")',
+            'puts "mkmf compile probe OK"'
+          ) | Set-Content -Path $probeScript -Encoding ascii
+          Push-Location $probeDir
+          & $rubyExe $probeScript
+          $probeExit = $LASTEXITCODE
+          if ($probeExit -ne 0 -and $env:DIAGNOSTIC_MKMF_LOGS -eq 'true' -and (Test-Path (Join-Path $probeDir 'mkmf.log'))) {
+            Write-Host "::group::mkmf probe log"
+            Get-Content (Join-Path $probeDir 'mkmf.log') -Raw
+            Write-Host "::endgroup::"
+          }
+          Pop-Location
+          if ($probeExit -ne 0) {
+            Write-Error "Build failed: Ruby mkmf could not compile a trivial executable with the resolved native build surface."
+            exit $probeExit
+          }
+
+          $objdump = Join-Path $msys "$prefix\bin\objdump.exe"
+          $prefixBin = Join-Path $msys "$prefix\bin"
+
+          function Invoke-Checked([string] $message, [scriptblock] $block) {
+            & $block
+            if ($LASTEXITCODE -ne 0) {
+              if ($env:DIAGNOSTIC_MKMF_LOGS -eq 'true' -and $harnessRoot -and (Test-Path $harnessRoot)) {
+                $logs = @(Get-ChildItem -Path $harnessRoot -Recurse -Filter mkmf.log -File -ErrorAction SilentlyContinue)
+                foreach ($log in $logs) {
+                  Write-Host "::group::mkmf log: $($log.FullName)"
+                  Get-Content $log.FullName -Raw
+                  Write-Host "::endgroup::"
+                }
+              }
+              Write-Error "$message failed with exit code $LASTEXITCODE."
+              exit $LASTEXITCODE
+            }
+          }
+
+          function Get-DllDependencies([string] $path) {
+            if (!(Test-Path $path)) {
+              return @()
+            }
+            @(& $objdump -p $path 2>$null |
+              Select-String -Pattern 'DLL Name:\s*(.+)$' |
+              ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() } |
+              Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+              Sort-Object -Unique)
+          }
+
+          $runtimeDlls = [System.Collections.Hashtable]::new([StringComparer]::OrdinalIgnoreCase)
+          function Add-DllClosure([string] $dllName) {
+            if ([string]::IsNullOrWhiteSpace($dllName)) {
+              return
+            }
+            $dllPath = Join-Path $prefixBin $dllName
+            if (!(Test-Path $dllPath)) {
+              Write-Host "::notice::Runtime DLL dependency $dllName is not in $prefixBin; assuming system or non-UCRT dependency."
+              return
+            }
+            if ($runtimeDlls.ContainsKey($dllName)) {
+              return
+            }
+            $runtimeDlls[$dllName] = $dllPath
+            foreach ($dependency in Get-DllDependencies $dllPath) {
+              Add-DllClosure $dependency
+            }
+          }
+
+          function Add-DllDependenciesFromPath([string] $path) {
+            foreach ($dependency in Get-DllDependencies $path) {
+              Add-DllClosure $dependency
+            }
+          }
+
+          function Build-GemWithHarness([string] $gemName) {
+            Write-Host "::group::Build $gemName"
+            Push-Location $harnessRoot
+            Invoke-Checked "$gemName binary gem build harness" { & $rubyExe -I. -e "require 'rake'; Rake.application.load_rakefile; Rake::Task['build:gem'].invoke('$gemName')" }
+            $builtGem = Get-ChildItem -Path (Join-Path $harnessRoot 'pkg') -Filter "$gemName-*.gem" -File |
+              Where-Object { $_.Name -match "^$([regex]::Escape($gemName))-\d" } |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 1
+            if (-not $builtGem) {
+              Pop-Location
+              Write-Error "Build failed: no gem artifact was produced for $gemName."
+              exit 1
+            }
+            Copy-Item $builtGem.FullName (Join-Path $pkgDir $builtGem.Name) -Force
+            Invoke-Checked "$gemName local install" { & $gemExe install $builtGem.FullName --local --force }
+            Pop-Location
+            Write-Host "::endgroup::"
+          }
+
+          foreach ($gemName in @('glib2', 'gobject-introspection')) {
+            Build-GemWithHarness $gemName
+          }
+
+          $env:GI_TYPELIB_PATH = "$msys\$prefix\lib\girepository-1.0"
+          $gIrInspect = Join-Path $prefixBin 'g-ir-inspect.exe'
+          Get-ChildItem "$msys\$prefix\lib\girepository-1.0" -Filter '*.typelib' -File |
+            ForEach-Object {
+              $namespace = $_.BaseName -replace '-[0-9][0-9.]*$', ''
+              $shlibs = @(& $gIrInspect --print-shlibs $namespace 2>$null)
+              if ($LASTEXITCODE -eq 0) {
+                foreach ($line in $shlibs) {
+                  foreach ($match in [regex]::Matches($line, '[A-Za-z0-9_+.-]+\.dll')) {
+                    Add-DllClosure $match.Value
+                  }
+                }
+              }
+            }
+          foreach ($pattern in @('libgirepository*.dll', 'libglib-2.0-0.dll', 'libgobject-2.0-0.dll', 'libgio-2.0-0.dll', 'libgmodule-2.0-0.dll', 'libgtk-3-0.dll', 'libgdk-3-0.dll', 'libgdk_pixbuf-2.0-0.dll', 'libatk-1.0-0.dll', 'libpango*.dll', 'libcairo*.dll')) {
+            Get-ChildItem -Path $prefixBin -Filter $pattern -File -ErrorAction SilentlyContinue |
+              ForEach-Object { Add-DllClosure $_.Name }
+          }
+
+          foreach ($requiredRuntimeDll in @('libgdk_pixbuf-2.0-0.dll', 'libgtk-3-0.dll')) {
+            if (-not $runtimeDlls.ContainsKey($requiredRuntimeDll)) {
+              Write-Error "Build failed: expected runtime DLL $requiredRuntimeDll was not discovered in the GTK/GI closure."
+              exit 1
+            }
+          }
+
+          $giVendor = Join-Path $sourceRoot 'gobject-introspection\vendor\local'
+          $typelibDst = Join-Path $giVendor 'lib\girepository-1.0'
+          $fontDst = Join-Path $giVendor 'etc\fonts'
+          $loaderDst = Join-Path $giVendor 'lib\gdk-pixbuf-2.0\2.10.0\loaders'
+          New-Item -ItemType Directory -Path $typelibDst, $fontDst, $loaderDst -Force | Out-Null
+          Copy-Item "$msys\$prefix\lib\girepository-1.0\*.typelib" $typelibDst -Force
+          Copy-Item "$msys\$prefix\etc\fonts\fonts.conf" $fontDst -Force
+          if (Test-Path "$msys\$prefix\etc\fonts\conf.d") {
+            Copy-Item "$msys\$prefix\etc\fonts\conf.d" (Join-Path $fontDst 'conf.d') -Recurse -Force
+          }
+
+          $loaderSrc = "$msys\$prefix\lib\gdk-pixbuf-2.0\2.10.0\loaders"
+          if (Test-Path $loaderSrc) {
+            Get-ChildItem -Path $loaderSrc -Filter '*.dll' -File |
+              ForEach-Object {
+                Copy-Item $_.FullName $loaderDst -Force
+                Add-DllDependenciesFromPath $_.FullName
+              }
+            $cacheDst = Split-Path $loaderDst -Parent
+            $env:GDK_PIXBUF_MODULEDIR = $loaderDst
+            & "$msys\$prefix\bin\gdk-pixbuf-query-loaders.exe" | Set-Content (Join-Path $cacheDst 'loaders.cache.in')
+            (Get-Content (Join-Path $cacheDst 'loaders.cache.in') -Raw).Replace($loaderDst, '@@MODULEDIR@@') |
+              Set-Content (Join-Path $cacheDst 'loaders.cache.in') -Encoding ascii
+          }
+
+          foreach ($target in @('glib2', 'cairo')) {
+            $binTarget = Join-Path $sourceRoot "$target\vendor\local\bin"
+            New-Item -ItemType Directory -Path $binTarget -Force | Out-Null
+            foreach ($dll in ($runtimeDlls.Keys | Sort-Object)) {
+              Copy-Item $runtimeDlls[$dll] $binTarget -Force
+            }
+          }
+
+          foreach ($gemName in @('gobject-introspection', 'glib2')) {
+            Push-Location (Join-Path $sourceRoot $gemName)
+            Invoke-Checked "$gemName rebuild with vendor assets" { & $gemExe build "$gemName.gemspec" }
+            $rebuilt = Get-ChildItem -Filter "$gemName-*.gem" -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            Copy-Item $rebuilt.FullName (Join-Path $pkgDir $rebuilt.Name) -Force
+            Invoke-Checked "$gemName reinstall with vendor assets" { & $gemExe install $rebuilt.FullName --local --force }
+            Pop-Location
+          }
+
+          foreach ($gemName in @('gio2', 'cairo', 'cairo-gobject', 'pango', 'gdk_pixbuf2', 'atk', 'gdk3', 'gtk3')) {
+            Build-GemWithHarness $gemName
+          }
+
+      - name: Build and stage runtime gem bundle
+        shell: powershell
+        env:
+          PATH: ${{ steps.lanepath.outputs.path }}
+        run: |
+          $msys = $env:MSYS2_ROOT
+          $prefix = $env:MSYS2_PREFIX
+          $rubyRoot = $env:RUBY_ROOT
+          $gemExe = $env:GEM_EXE
+          $rubyExe = $env:RUBY_EXE
+          $pkgDir = $env:PKG_DIR
+          $env:Path = "$rubyRoot\bin;$msys\$prefix\bin;$msys\usr\bin;$env:Path"
+          $env:RI_DEVKIT = $msys
+          $env:MSYSTEM_PREFIX = "/$prefix"
+          $env:MINGW_PREFIX = "/$prefix"
+
+          $runtimeGems = @(
+            ($env:RUNTIME_GEMS -split '[,\s]+') |
+              Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+              Sort-Object -Unique
+          )
+          $nativeRuntimeGems = @(
+            ($env:NATIVE_RUNTIME_GEMS -split '[,\s]+') |
+              Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+              Sort-Object -Unique
+          )
+          foreach ($gemName in $nativeRuntimeGems) {
+            if ($runtimeGems -notcontains $gemName) {
+              Write-Error "Runtime bundle failed: native runtime gem $gemName is not present in runtime-gems."
+              exit 1
+            }
+          }
+
+          Push-Location $pkgDir
+          foreach ($gemName in $runtimeGems) {
+            & $gemExe install $gemName --clear-sources --source https://rubygems.org --force
+            if ($LASTEXITCODE -ne 0) {
+              Pop-Location
+              Write-Error "Runtime bundle failed: gem install $gemName failed."
+              exit $LASTEXITCODE
+            }
+          }
+          Pop-Location
+
+          foreach ($gemName in @('ox', 'curses')) {
+            if ($runtimeGems -notcontains $gemName) {
+              continue
+            }
+            $repackScript = @(
+              'require "fileutils"',
+              'require "rubygems"',
+              'gem_name = ARGV.fetch(0)',
+              'platform = ENV.fetch("GEM_PLATFORM")',
+              'spec = Gem::Specification.find_by_name(gem_name)',
+              'parent = File.join(ENV.fetch("RUNNER_TEMP"), "native-repack")',
+              'target = File.join(parent, "#{spec.name}-#{spec.version}")',
+              'FileUtils.rm_rf(target)',
+              'FileUtils.mkdir_p(parent)',
+              'FileUtils.cp_r("#{spec.full_gem_path}/.", target)',
+              'Dir.chdir(target) do',
+              '  repack = spec.dup',
+              '  repack.platform = Gem::Platform.new(platform)',
+              '  repack.extensions = []',
+              '  repack.files = Dir.glob("**/*", File::FNM_DOTMATCH).reject { |path| path == "." || path == ".." || File.directory?(path) || path.end_with?(".gem") }',
+              '  File.write("#{gem_name}.gemspec", repack.to_ruby)',
+              'end',
+              'puts target',
+              'puts spec.version'
+            ) -join "`n"
+            $repackScriptPath = Join-Path $env:RUNNER_TEMP "repack-$gemName.rb"
+            Set-Content -Path $repackScriptPath -Value $repackScript -Encoding ascii
+            $metadata = @(& $rubyExe $repackScriptPath $gemName)
+            if ($LASTEXITCODE -ne 0 -or $metadata.Count -lt 2) {
+              Write-Error "Runtime bundle failed: native repack preparation failed for $gemName."
+              exit 1
+            }
+            $repackDir = $metadata[0].Trim()
+            $repackVersion = $metadata[1].Trim()
+            Push-Location $repackDir
+            & $gemExe build "$gemName.gemspec"
+            if ($LASTEXITCODE -ne 0) {
+              Pop-Location
+              Write-Error "Runtime bundle failed: native repack gem build failed for $gemName."
+              exit $LASTEXITCODE
+            }
+            $repackedGem = Get-ChildItem -Path $repackDir -Filter "$gemName-$repackVersion-$env:GEM_PLATFORM.gem" -File | Select-Object -First 1
+            if (-not $repackedGem) {
+              Pop-Location
+              Write-Error "Runtime bundle failed: expected repacked gem $gemName-$repackVersion-$env:GEM_PLATFORM.gem was not produced."
+              exit 1
+            }
+            Copy-Item $repackedGem.FullName (Join-Path $pkgDir $repackedGem.Name) -Force
+            & $gemExe install $repackedGem.FullName --local --force
+            if ($LASTEXITCODE -ne 0) {
+              Pop-Location
+              Write-Error "Runtime bundle failed: local install failed for repacked $($repackedGem.Name)."
+              exit $LASTEXITCODE
+            }
+            Pop-Location
+          }
+
+          $runtimeGemExcludes = @(
+            'benchmark',
+            'bigdecimal',
+            'debug',
+            'fiddle',
+            'irb',
+            'minitest',
+            'native-package-installer',
+            'nkf',
+            'pkg-config',
+            'power_assert',
+            'racc',
+            'rake',
+            'rbs',
+            'rdoc',
+            'reline',
+            'repl_type_completor',
+            'test-unit',
+            'typeprof',
+            'win32ole'
+          )
+          $env:RUNTIME_GEM_EXCLUDES = $runtimeGemExcludes -join ' '
+
+          $manifestScript = @(
+            'require "rubygems"',
+            'require "set"',
+            'requested = ENV.fetch("RUNTIME_GEMS").split(/[,\s]+/).reject(&:empty?)',
+            'excluded = ENV.fetch("RUNTIME_GEM_EXCLUDES").split(/[,\s]+/).reject(&:empty?).to_set',
+            'queue = requested.dup',
+            'selected = {}',
+            'until queue.empty?',
+            '  name = queue.shift',
+            '  next if name.nil? || name.empty? || excluded.include?(name)',
+            '  specs = Gem::Specification.find_all_by_name(name)',
+            '  spec = specs.reject(&:default_gem?).max_by(&:version) || specs.max_by(&:version)',
+            '  abort("runtime gem manifest failed: installed gem #{name.inspect} was not found") unless spec',
+            '  next if spec.default_gem? || excluded.include?(spec.name) || selected.key?(spec.name)',
+            '  selected[spec.name] = spec',
+            '  spec.runtime_dependencies.each { |dependency| queue << dependency.name unless excluded.include?(dependency.name) || selected.key?(dependency.name) }',
+            'end',
+            'selected.values.sort_by(&:name).each { |spec| puts [spec.name, spec.version.to_s, spec.full_name].join("\t") }'
+          ) -join "`n"
+          $manifestScriptPath = Join-Path $env:RUNNER_TEMP 'runtime-gem-manifest.rb'
+          Set-Content -Path $manifestScriptPath -Value $manifestScript -Encoding ascii
+          $manifestRows = @(& $rubyExe $manifestScriptPath)
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Runtime bundle failed: runtime gem manifest generation failed."
+            exit $LASTEXITCODE
+          }
+
+          $cacheRoots = @(
+            (Join-Path $rubyRoot 'lib\ruby\gems\4.0.0\cache'),
+            (Join-Path $env:USERPROFILE '.local\share\gem\ruby\4.0.0\cache')
+          ) | Where-Object { Test-Path $_ } | Sort-Object -Unique
+          $manifestFiles = [System.Collections.Generic.List[string]]::new()
+          foreach ($gemName in @('glib2', 'gobject-introspection', 'gio2', 'cairo', 'cairo-gobject', 'pango', 'gdk_pixbuf2', 'atk', 'gdk3', 'gtk3')) {
+            $platformGem = Get-ChildItem -Path $pkgDir -Filter "$gemName-*.gem" -File |
+              Where-Object { $_.Name -match "^$([regex]::Escape($gemName))-\d" } |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 1
+            if (-not $platformGem) {
+              Write-Error "Runtime bundle failed: expected prebuilt package gem $gemName was not found in pkg."
+              exit 1
+            }
+            $manifestFiles.Add($platformGem.Name)
+          }
+
+          foreach ($row in $manifestRows) {
+            if ([string]::IsNullOrWhiteSpace($row)) {
+              continue
+            }
+            $parts = $row -split "`t"
+            $gemName = $parts[0]
+            $fullName = $parts[2]
+            $fileName = "$fullName.gem"
+            $existingPkgGem = Join-Path $pkgDir $fileName
+            if (Test-Path $existingPkgGem) {
+              $manifestFiles.Add($fileName)
+              continue
+            }
+            $sourceGem = $null
+            foreach ($cacheRoot in $cacheRoots) {
+              $candidate = Join-Path $cacheRoot $fileName
+              if (Test-Path $candidate) {
+                $sourceGem = $candidate
+                break
+              }
+            }
+            if (-not $sourceGem) {
+              Write-Error "Runtime bundle failed: manifest selected $fileName for $gemName, but no matching .gem file was found in pkg or RubyGems cache."
+              exit 1
+            }
+            Copy-Item $sourceGem (Join-Path $pkgDir $fileName) -Force
+            $manifestFiles.Add($fileName)
+          }
+
+          $manifestFiles = @($manifestFiles | Sort-Object -Unique)
+          foreach ($excluded in $runtimeGemExcludes) {
+            $escaped = [regex]::Escape($excluded)
+            $matches = @($manifestFiles | Where-Object { $_ -match "^$escaped-\d" })
+            if ($matches.Count -gt 0) {
+              Write-Error "Runtime bundle failed: excluded package gem $excluded was selected for shipping: $($matches -join ', ')"
+              exit 1
+            }
+          }
+
+          Set-Content -Path (Join-Path $pkgDir 'runtime-gems-manifest.txt') -Value $manifestFiles -Encoding ascii
+          Set-Content -Path (Join-Path $pkgDir 'runtime-gems-install-targets.txt') -Value $runtimeGems -Encoding ascii
+          $installScript = @(
+            '@echo off',
+            'setlocal',
+            'pushd "%~dp0"',
+            'for /f "usebackq delims=" %%G in ("runtime-gems-install-targets.txt") do (',
+            '  gem install --local --no-document "%%G"',
+            '  if errorlevel 1 exit /b 1',
+            ')',
+            'popd',
+            'endlocal'
+          ) -join "`r`n"
+          Set-Content -Path (Join-Path $pkgDir 'install-runtime-gems.cmd') -Value $installScript -Encoding ascii
+
+          foreach ($gemName in $nativeRuntimeGems) {
+            $platformGem = Get-ChildItem -Path $pkgDir -Filter "$gemName-*$env:GEM_PLATFORM.gem" -File |
+              Where-Object { $_.Name -match "^$([regex]::Escape($gemName))-\d.*-$([regex]::Escape($env:GEM_PLATFORM))\.gem$" } |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 1
+            if (-not $platformGem) {
+              Write-Error "Runtime bundle failed: $gemName installed, but no $env:GEM_PLATFORM binary gem was collected in pkg."
+              exit 1
+            }
+          }
+
+      - name: Smoke packaged runtime gem bundle on clean RubyInstaller
+        shell: powershell
+        run: |
+          $pkgDir = $env:PKG_DIR
+          $manifestPath = Join-Path $pkgDir 'runtime-gems-manifest.txt'
+          $installTargetsPath = Join-Path $pkgDir 'runtime-gems-install-targets.txt'
+          if (!(Test-Path $manifestPath) -or !(Test-Path $installTargetsPath)) {
+            Write-Error "Clean packaged smoke failed: manifest or install targets missing from $pkgDir."
+            exit 1
+          }
+
+          $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION
+          $archive = Join-Path $env:RUNNER_TEMP "rubyinstaller-$rubyInstallerVersion-x64.7z"
+          if (!(Test-Path $archive)) {
+            Write-Error "Clean packaged smoke failed: RubyInstaller archive is missing at $archive."
+            exit 1
+          }
+
+          $smokeParent = 'C:\Ruby4Lich5\clean-smoke-ruby'
+          if (Test-Path $smokeParent) {
+            Remove-Item $smokeParent -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $smokeParent -Force | Out-Null
+
+          $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
+          if (!(Test-Path $sevenZip)) {
+            $sevenZip = '7z.exe'
+          }
+          & $sevenZip x $archive "-o$smokeParent" -y
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Clean packaged smoke failed: RubyInstaller extraction failed."
+            exit $LASTEXITCODE
+          }
+
+          $rubyExe = Get-ChildItem $smokeParent -Recurse -Filter ruby.exe -File | Where-Object {
+            $_.FullName -match '\\bin\\ruby\.exe$'
+          } | Select-Object -First 1
+          if (-not $rubyExe) {
+            Write-Error "Clean packaged smoke failed: ruby.exe was not found under $smokeParent."
+            exit 1
+          }
+          $rubyRoot = Split-Path (Split-Path $rubyExe.FullName -Parent) -Parent
+          $gemExe = Join-Path $rubyRoot 'bin\gem.cmd'
+          $env:Path = "$rubyRoot\bin;C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0"
+          foreach ($name in @('RI_DEVKIT', 'MSYSTEM', 'MSYSTEM_PREFIX', 'MINGW_PREFIX', 'PKG_CONFIG_PATH', 'GI_TYPELIB_PATH', 'GDK_PIXBUF_MODULEDIR', 'FONTCONFIG_PATH', 'FONTCONFIG_FILE')) {
+            Remove-Item "Env:\$name" -ErrorAction SilentlyContinue
+          }
+
+          $manifestFiles = @(Get-Content $manifestPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+          foreach ($manifestFile in $manifestFiles) {
+            if (!(Test-Path (Join-Path $pkgDir $manifestFile))) {
+              Write-Error "Clean packaged smoke failed: manifest gem is missing: $manifestFile."
+              exit 1
+            }
+          }
+
+          $installTargets = @(Get-Content $installTargetsPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+          Push-Location $pkgDir
+          & $gemExe install --local --no-document --force @installTargets
+          $installExit = $LASTEXITCODE
+          Pop-Location
+          if ($installExit -ne 0) {
+            Write-Error "Clean packaged smoke failed: install targets failed on non-DevKit RubyInstaller."
+            exit $installExit
+          }
+
+          $fontconfigSmoke = @(
+            'require "rubygems"',
+            'require "gobject-introspection"',
+            'specs = Gem::Specification.find_all_by_name("gobject-introspection")',
+            'abort("gobject-introspection 4.3.4 was installed unexpectedly") if specs.any? { |spec| spec.version.to_s == "4.3.4" }',
+            'spec = Gem::Specification.find_by_name("gobject-introspection")',
+            'fontconfig_file = ENV["FONTCONFIG_FILE"]',
+            'abort("FONTCONFIG_FILE was not set") if fontconfig_file.nil? || fontconfig_file.empty?',
+            'abort("FONTCONFIG_FILE contains stale gobject-introspection 4.3.4 path: #{fontconfig_file}") if fontconfig_file.include?("gobject-introspection-4.3.4")',
+            'expected = File.join(spec.full_gem_path, "vendor", "local", "etc", "fonts", "fonts.conf")',
+            'abort("FONTCONFIG_FILE mismatch: expected #{expected}, got #{fontconfig_file}") unless File.expand_path(fontconfig_file) == File.expand_path(expected)',
+            'abort("Fontconfig file missing: #{expected}") unless File.exist?(expected)',
+            'puts "gobject-introspection Fontconfig file OK: #{fontconfig_file}"'
+          ) -join "`n"
+          $fontconfigSmokePath = Join-Path $env:RUNNER_TEMP 'smoke-gobject-fontconfig.rb'
+          Set-Content -Path $fontconfigSmokePath -Value $fontconfigSmoke -Encoding ascii
+          & $rubyExe.FullName $fontconfigSmokePath
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Clean packaged smoke failed: gobject-introspection Fontconfig validation failed."
+            exit $LASTEXITCODE
+          }
+
+          & $rubyExe.FullName -e "require 'sqlite3'; require 'ox'; require 'ffi'; require 'ascii_charts'; require 'kramdown'; require 'webrick'; require 'redis'; require 'sequel'; require 'set'; require 'terminal-table'; require 'tzinfo'; require 'curses'; require 'os'; require 'cairo'; require 'gtk3'; Gtk.init; puts 'Clean packaged Ruby4/Lich runtime smoke OK'"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Clean packaged smoke failed: runtime require set failed."
+            exit $LASTEXITCODE
+          }
+
+      - name: Stage artifact
+        shell: powershell
+        run: |
+          $pkgDir = $env:PKG_DIR
+          $distPkg = Join-Path $env:GITHUB_WORKSPACE 'dist\pkg'
+          if (Test-Path $distPkg) {
+            Remove-Item $distPkg -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $distPkg -Force | Out-Null
+
+          foreach ($file in @(Get-Content (Join-Path $pkgDir 'runtime-gems-manifest.txt'))) {
+            if ([string]::IsNullOrWhiteSpace($file)) {
+              continue
+            }
+            Copy-Item (Join-Path $pkgDir $file) (Join-Path $distPkg $file) -Force
+          }
+          Copy-Item (Join-Path $pkgDir 'runtime-gems-manifest.txt') (Join-Path $distPkg 'runtime-gems-manifest.txt') -Force
+          Copy-Item (Join-Path $pkgDir 'runtime-gems-install-targets.txt') (Join-Path $distPkg 'runtime-gems-install-targets.txt') -Force
+          Copy-Item (Join-Path $pkgDir 'install-runtime-gems.cmd') (Join-Path $distPkg 'install-runtime-gems.cmd') -Force
+
+      - name: Upload Ruby4 bundled gems
+        uses: actions/upload-artifact@v4
+        with:
+          name: ruby4-bundled-gems-windows-ucrt64
+          path: dist/pkg/*
+          retention-days: 90
+          if-no-files-found: error

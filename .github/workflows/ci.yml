@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint (RuboCop)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3.0'
+          bundler-cache: true
+
+      - name: Run RuboCop
+        run: |
+          bundle exec rubocop || echo "RuboCop not configured yet"
+
+  validate:
+    name: Validate Repository Structure
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check directory structure
+        run: |
+          echo "Checking repository structure..."
+          test -d .github/workflows || (echo "Missing .github/workflows" && exit 1)
+          echo "✅ Repository structure OK"
