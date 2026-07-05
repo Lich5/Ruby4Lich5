@@ -50,6 +50,8 @@ RSpec.describe Ruby4Lich5::Classifier do
         allow(rubygems_client).to receive(:versions).with('sqlite3').and_return(
           [{ 'number' => '1.7.3', 'platform' => 'x64-mingw-ucrt' }]
         )
+        allow(rubygems_client).to receive(:asset_filename)
+          .with('sqlite3', '1.7.3', 'x64-mingw-ucrt').and_return('sqlite3-1.7.3-x64-mingw-ucrt.gem')
         inspector_class = fake_inspector_class(
           ruby_path     => { extensions?: true, abi_present?: false },
           platform_path => { extensions?: true, abi_present?: true }
@@ -92,6 +94,8 @@ RSpec.describe Ruby4Lich5::Classifier do
         allow(rubygems_client).to receive(:versions).with('sqlite3').and_return(
           [{ 'number' => '1.7.3', 'platform' => 'x64-mingw-ucrt' }]
         )
+        allow(rubygems_client).to receive(:asset_filename)
+          .with('sqlite3', '1.7.3', 'x64-mingw-ucrt').and_return('sqlite3-1.7.3-x64-mingw-ucrt.gem')
         inspector_class = fake_inspector_class(
           ruby_path     => { extensions?: true, abi_present?: false },
           platform_path => { extensions?: true, abi_present?: false }

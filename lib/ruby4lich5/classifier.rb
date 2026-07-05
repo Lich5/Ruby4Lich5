@@ -63,7 +63,7 @@ module Ruby4Lich5
     def pass_through_classification(name, version, platform, ruby_abi)
       return nil unless upstream_platform_build_exists?(name, version, platform)
 
-      asset = "#{name}-#{version}-#{platform}.gem"
+      asset = @rubygems_client.asset_filename(name, version, platform)
       path = @rubygems_client.download_gem(name, version, platform: platform)
       return nil unless @gem_inspector_class.new(path).abi_present?(ruby_abi)
 

@@ -53,6 +53,28 @@ module Ruby4Lich5
       raise RequestError, "malformed versions response for #{gem_name}: #{e.message}"
     end
 
+    # Builds the exact asset filename rubygems.org publishes for a gem
+    # version and platform -- the single source of truth for this naming
+    # rule. {#download_gem} calls this internally; callers that need to know
+    # the asset name ahead of (or without) a download, such as
+    # {Classifier#pass_through_classification}, should call this instead of
+    # building the string themselves, so the two can never drift apart.
+    #
+    # @param gem_name [String]
+    # @param version [String] exact version number, e.g. +"3.5.6"+
+    # @param platform [String] the RubyGems platform tag, e.g.
+    #   +"x64-mingw-ucrt"+, or +"ruby"+ for the platform-independent source gem
+    # @return [String]
+    # @raise [ArgumentError] if +gem_name+, +version+, or +platform+ is
+    #   missing, malformed, or contains unsafe characters
+    def asset_filename(gem_name, version, platform)
+      validate_token!(gem_name, 'gem name')
+      validate_version!(version)
+      validate_token!(platform, 'platform')
+
+      platform == 'ruby' ? "#{gem_name}-#{version}.gem" : "#{gem_name}-#{version}-#{platform}.gem"
+    end
+
     # Downloads one exact gem package and saves it to a temp file.
     #
     # Deliberately does not clean up the temp file or its containing
@@ -70,11 +92,7 @@ module Ruby4Lich5
     #   missing, malformed, or contains unsafe characters
     # @raise [RequestError] if the download fails
     def download_gem(gem_name, version, platform: 'ruby')
-      validate_token!(gem_name, 'gem name')
-      validate_version!(version)
-      validate_token!(platform, 'platform')
-
-      filename = platform == 'ruby' ? "#{gem_name}-#{version}.gem" : "#{gem_name}-#{version}-#{platform}.gem"
+      filename = asset_filename(gem_name, version, platform)
       body = @http_get.call(URI("#{BASE_URL}/downloads/#{filename}"))
 
       path = File.join(Dir.mktmpdir('ruby4lich5-gem-'), filename)
