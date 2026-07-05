@@ -108,7 +108,14 @@ module Ruby4Lich5
               "found #{actual} -- likely an upstream version mismatch. Anchor: #{old[0, 60].inspect}"
       end
 
-      content.gsub(old, step.fetch(:new))
+      # Block form, not content.gsub(old, new) -- gsub's String-replacement
+      # form reinterprets backslash sequences like \1 or \& as backreferences
+      # even though old is a plain String, not a Regexp with capture groups.
+      # Verified directly: "TARGET".gsub("TARGET", "a\\1b") silently drops
+      # the \1 and produces "ab", not "a\1b". The block form inserts its
+      # return value literally, which is what a C-source replacement needs.
+      new = step.fetch(:new)
+      content.gsub(old) { new }
     end
 
     # Resolves a patch's declared +file+ against +source_dir+, and confirms

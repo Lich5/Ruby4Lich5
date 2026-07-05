@@ -14,7 +14,15 @@ module Ruby4Lich5
     # +../+ -- excluding +/+ entirely makes path traversal structurally
     # impossible in any path built from this value, rather than trying to
     # enumerate every way to spell it.
-    PATTERN = /\A[a-zA-Z0-9._-]+\z/
+    #
+    # The leading negative lookahead specifically rejects "." and ".." --
+    # both individually allowed characters, but reserved filesystem segments
+    # that File.join treats specially (current dir / parent dir) when they
+    # make up the *entire* value, not just a substring. Verified directly:
+    # File.join("/repo/patches", "..") resolves to "/repo/patches"'s parent,
+    # escaping patches_root exactly the way a +/+-containing value would,
+    # even though the plain allowlist above never excluded a bare +.+ or +..+.
+    PATTERN = /\A(?!\.{1,2}\z)[a-zA-Z0-9._-]+\z/
     private_constant :PATTERN
 
     # @param value [Object] candidate token. Deliberately rejects anything

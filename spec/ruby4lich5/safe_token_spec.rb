@@ -28,6 +28,18 @@ RSpec.describe Ruby4Lich5::SafeToken do
         .to raise_error(ArgumentError, /disallowed characters/)
     end
 
+    it 'rejects a bare "." even though "." is individually an allowed character' do
+      # File.join(patches_root, ".") resolves to patches_root itself -- not a
+      # traversal, but not a real gem-name directory lookup either.
+      expect { described_class.validate!('.', 'gem name') }
+        .to raise_error(ArgumentError, /disallowed characters/)
+    end
+
+    it 'rejects a bare ".." (verified to escape patches_root via File.join otherwise)' do
+      expect { described_class.validate!('..', 'gem name') }
+        .to raise_error(ArgumentError, /disallowed characters/)
+    end
+
     it 'rejects a non-String with ArgumentError, not TypeError, even when it would stringify to something valid' do
       # :gtk3.to_s is "gtk3" -- a valid-looking token if coerced. Rejecting it
       # up front, rather than coercing and validating the coerced result, is

@@ -167,6 +167,26 @@ RSpec.describe Ruby4Lich5::PatchApplier do
         expect(content).not_to match(/\n\n\n/)
       end
     end
+
+    context "when a step's replacement text contains a literal backslash-digit sequence" do
+      before do
+        write_patch(@patches_root, 'widget', '01-fix', <<~'RUBY')
+          {
+            file: 'lib/widget.c',
+            marker: 'MARK',
+            steps: [{ old: 'TARGET', new: 'line one\1line two /* MARK */', count: 1 }]
+          }
+        RUBY
+        write_source(@source_dir, 'lib/widget.c', "TARGET\n")
+      end
+
+      it 'inserts the replacement literally instead of treating \\1 as a backreference' do
+        applier.apply_all('widget', @source_dir)
+
+        content = File.read(File.join(@source_dir, 'lib/widget.c'))
+        expect(content).to include('line one\1line two')
+      end
+    end
   end
 
   describe 'the real curated patches' do
