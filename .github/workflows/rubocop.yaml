@@ -34,7 +34,12 @@ jobs:
             const repo  = context.repo.repo;
             const ev    = context.eventName;
             function isRubyLintable(path) {
-              return path.endsWith('.rb');
+              // .rb files, plus RuboCop's own config and any custom cops --
+              // a config-only change must still trigger a real lint run
+              // against the new config, not be silently skipped.
+              return path.endsWith('.rb') ||
+                path === '.rubocop.yml' ||
+                path.startsWith('.rubocop/');
             }
             async function changedFilesForPR(number) {
               const files = await github.paginate(

@@ -23,7 +23,6 @@
 #     .gitattributes
 #     .gitignore
 #     .rubocop.yml
-#     .ruby-version
 #     README.md
 # - If ANY non-ignored file changed, should_test = true.
 # - If it cannot determine the file list (API edge cases), it defaults to
@@ -75,7 +74,6 @@ jobs:
               '.gitattributes',
               '.gitignore',
               '.rubocop.yml',
-              '.ruby-version',
               'README.md',
             ];
             function isIgnored(path) {
