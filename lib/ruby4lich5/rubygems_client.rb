@@ -3,6 +3,7 @@
 require 'net/http'
 require 'json'
 require 'tmpdir'
+require_relative 'safe_token'
 
 module Ruby4Lich5
   # Thin HTTP boundary around rubygems.org. Everything the classifier needs to
@@ -14,14 +15,6 @@ module Ruby4Lich5
     # request this client cannot recover from on its own, or when a 200
     # response doesn't have the shape this client expects.
     class RequestError < StandardError; end
-
-    # Characters permitted in a gem name or platform tag. Deliberately an
-    # allowlist, not a denylist of traversal patterns like +../+ -- excluding
-    # +/+ entirely makes path traversal structurally impossible in the
-    # filenames built from these values, rather than trying to enumerate
-    # every way to spell it.
-    SAFE_TOKEN = /\A[a-zA-Z0-9._-]+\z/
-    private_constant :SAFE_TOKEN
 
     BASE_URL = 'https://rubygems.org'
     private_constant :BASE_URL
@@ -43,7 +36,7 @@ module Ruby4Lich5
     # @raise [RequestError] if the request fails, the response isn't valid
     #   JSON, or the parsed JSON isn't the expected array-of-hashes shape
     def versions(gem_name)
-      validate_token!(gem_name, 'gem name')
+      SafeToken.validate!(gem_name, 'gem name')
 
       body = @http_get.call(URI("#{BASE_URL}/api/v1/versions/#{gem_name}.json"))
       parsed = JSON.parse(body.dup.force_encoding('UTF-8').scrub)
@@ -68,9 +61,9 @@ module Ruby4Lich5
     # @raise [ArgumentError] if +gem_name+, +version+, or +platform+ is
     #   missing, malformed, or contains unsafe characters
     def asset_filename(gem_name, version, platform)
-      validate_token!(gem_name, 'gem name')
+      SafeToken.validate!(gem_name, 'gem name')
       validate_version!(version)
-      validate_token!(platform, 'platform')
+      SafeToken.validate!(platform, 'platform')
 
       platform == 'ruby' ? "#{gem_name}-#{version}.gem" : "#{gem_name}-#{version}-#{platform}.gem"
     end
@@ -101,16 +94,6 @@ module Ruby4Lich5
     end
 
     private
-
-    # @param value [Object] candidate gem name or platform tag
-    # @param label [String] used only in the raised error message
-    # @raise [ArgumentError] if +value+ is nil, blank, or contains any
-    #   character outside {SAFE_TOKEN} -- in particular +/+, which blocks
-    #   path traversal in any filename built from this value
-    def validate_token!(value, label)
-      raise ArgumentError, "#{label} must not be nil or empty" if value.nil? || value.to_s.strip.empty?
-      raise ArgumentError, "#{label} contains disallowed characters: #{value.inspect}" unless SAFE_TOKEN.match?(value)
-    end
 
     # @param version [Object] candidate version string
     # @raise [ArgumentError] if +version+ is nil, blank, or not a
