@@ -8,10 +8,11 @@ can still opt in to a full MSYS2/RIDK toolchain afterward.
 
 ## Status
 
-Phase 1 (foundational decisions) is complete as of 2026-07 — see `docs/DECISIONS.md`.
-Phase 2 (the generalized front door) has not started; nothing beyond the inherited seed
-workflow exists yet. This README is deliberately a living document, not a spec frozen
-in stone.
+Phase 1 (foundational decisions), Phase 2 (front-door design), and Phase 5 (hardening/
+polish decisions) are complete as of 2026-07 — see `docs/DECISIONS.md`. Phase 3 and
+Phase 4 turned out to be fully satisfied as a side effect of Phase 1/2 (see below).
+Implementation hasn't started; nothing beyond the inherited seed workflow exists yet.
+This README is deliberately a living document, not a spec frozen in stone.
 
 ## What this factory does
 
@@ -115,14 +116,19 @@ January 2027, timed to the anticipated release/testing of Ruby 4.1.0.
 
 0. Urgent/time-bound fixes (e.g. Actions Node-version migrations) — handled as they come.
 1. **Foundational decisions** (gate everything else — see Phase 1 decisions below).
-2. Front door: generalize the fixed suite build into "build any named gem."
-3. Gems server / index: durable publish mechanism, retiring the hand-made test
-   prerelease.
-4. Installer assembly rework: consume the curated index instead of ad hoc bundles.
-5. Hardening/polish (code signing, deeper smoke tests, DLL-noise cleanup).
-6. Multi-version variants (Ruby 4.1.x) — additive if the Phase 1 matrix index is
-   designed right the first time.
-7. Docs/governance (load-order contract, build/release runbook, ADRs).
+2. **Front door** (design resolved — see Phase 2 decisions below; not yet implemented):
+   generalize the fixed suite build into "build any named gem."
+3. **Gems server / index** (satisfied by Phase 1 §1-3 + Phase 2 §6 — no separate work):
+   durable publish mechanism, retiring the hand-made test prerelease.
+4. **Installer assembly rework** (satisfied by Phase 1 §5-7, plus Phase 2 §4's
+   redundant-gem exclusion covering GA §2.11): repoint at the curated set.
+5. **Hardening/polish** (resolved — see Phase 5 decisions below): DevKit freeze fix,
+   duplicate-installs note, gio2 DLL-noise corral, `.lic`-pinning decision, code-signing
+   (deferred), deepened smoke.
+6. **Multi-version variants** (resolved — see Phase 6 decisions below): additive, since
+   the Phase 1 matrix index already accommodates a new Ruby ABI as a cell, not a redesign.
+7. **Docs/governance** (resolved — see Phase 7 decisions below): load-order contract,
+   ADR, and runbook.
 
 ## Phase 1 decisions (resolved — see [`docs/DECISIONS.md`](docs/DECISIONS.md) for the full record)
 
@@ -149,6 +155,82 @@ January 2027, timed to the anticipated release/testing of Ruby 4.1.0.
   Promotion to production always goes through the same approval chain.
 - **Automation philosophy:** automation may only fire on an authorized admin's own
   directly-controlled action, never on a lower-privileged or external signal.
+
+## Phase 2 decisions (resolved — see [`docs/DECISIONS.md`](docs/DECISIONS.md) for the full record)
+
+- **Tri-state classification:** pure (no extensions) / native pass-through (upstream
+  already precompiles a matching platform+ABI binary — verified against real
+  rubygems.org data, e.g. `sqlite3`/`ffi` already do, `gtk3`/`glib2`/`cairo` don't) /
+  native-self-contained (we compile via a known MSYS2 package mapping) /
+  native-needs-system-lib (reject loudly). No version-hunting fallback — an exact
+  requested version that lacks a precompiled match gets built ourselves, not
+  substituted with an earlier version that happens to have one.
+- **DLL bundling:** consolidate to the one mechanism that actually works (the PowerShell
+  DLL-closure walker); delete the dead, always-empty per-gem dedup script. Windows-only
+  for now — Linux/macOS will need native, platform-specific vendoring logic later, not a
+  shared script.
+- **Version-literal parameterization:** gem name+version become real per-gem inputs;
+  every patch asserts an exact expected match count and derives versions from the
+  actually-fetched source, not a trusted input string.
+- **Closure resolution:** reuse `Gem::Resolver`/`bundle lock` rather than a hand-rolled
+  solver; walk the resolved set bottom-up against the curation manifest, reusing
+  already-published compatible versions; any unbuildable dependency fails the whole
+  request loudly.
+- **Generalized smoke:** reuse the resolved closure as a throwaway `Gemfile` +
+  `Bundler.require` (solves require-ordering for free); `Gtk.init` stays as a narrow,
+  justified exception for GTK3 specifically. Bundled upstream test suites are reused
+  best-effort and reported in the PR, never as a build gate.
+- **Publish mechanism:** guard → checkpoint → build the full closure → upload as draft
+  releases → one PR per dispatch (not per gem) updating the curation manifest → PR merge
+  publishes the already-built drafts. Manifest pin and live releases go from draft to
+  live together, at the same approved moment.
+
+## Phase 3 & 4 — satisfied, not separately worked
+
+Both turned out to already be covered once Phase 1 and Phase 2 landed, rather than
+needing their own discussion — consistent with the roadmap's own "don't touch twice"
+principle. Phase 3's bullets (stand up a server repo, a durable publish mechanism, a
+curation manifest) are Phase 1 §1-4 and Phase 2 §6. Phase 4's bullets (repoint the
+installer workflow at the curated set; exclude redundant default/bundled gems per GA
+§2.11) are Phase 1 §5-7 and the closure-resolution design in Phase 2 §4, respectively.
+
+## Phase 5 decisions (resolved — see [`docs/DECISIONS.md`](docs/DECISIONS.md) for the full record)
+
+- **DevKit wizard freeze:** fix by moving DevKit install to the finish page (`postinstall
+  nowait`, visible console), matching RubyInstaller's own reference installer exactly.
+- **Duplicate-installs note:** documentation only — already verified safe, no fix needed.
+- **gio2/DLL noise:** a curated, verified list of 44 known-expected system DLLs (compared
+  case-insensitively) silences known-benign noise and summarizes genuine surprises per
+  gem — also the foundation for a future fail-loud-on-genuine-miss check.
+- **`.lic`-from-master pinning:** deliberately not pinned — the script-update cycle is
+  meant to be fluid, and Lich's own `;repository download-updates` mechanism (with a
+  per-script `unset-updatable` opt-out) already handles staleness/pinning at the
+  application level.
+- **Code-signing:** deferred, pending an upcoming policy decision that will inform next
+  steps. Nothing in this design forecloses adding it later.
+- **Deepened smoke:** split into environment (move smoke to its own CI job for a
+  genuinely clean, no-MSYS2-residue runner — not yet implemented) and depth (`Gtk.init`
+  remains sufficient per real historical experience; the Phase 2 §5 bundled-test-suite
+  reuse is the answer to "prove it works," not a second mechanism).
+
+## Phase 6 decisions (resolved — see [`docs/DECISIONS.md`](docs/DECISIONS.md) for the full record)
+
+- **ABI guard generalization:** make the installer-assembly workflow's Ruby-series
+  target (today hardcoded to `4.0.x`) a real per-build parameter, so a future Ruby 4.1
+  installer variant is a parameter value, not a forked workflow. Everything else a new
+  ABI needs (rebuild every tracked gem, keep the older ABI's variant running alongside)
+  is already covered by Phase 1 §2.
+
+## Phase 7 decisions (resolved — see [`docs/DECISIONS.md`](docs/DECISIONS.md) for the full record)
+
+- **Consumer load-order contract:** already solved in the design, not just documented —
+  Phase 2 §5's `Bundler.require` reuse requires gems in dependency-resolved order
+  automatically. A short explanatory note is still worth adding for non-Bundler consumers.
+- **ADR:** not adopting a separate convention — `DECISIONS.md` already serves that role.
+- **Build/release runbook:** deliberately deferred until real code exists to document
+  truthfully, not skipped.
+- **Keep `GEM-FACTORY-vision.md` current:** add a pointer at its top to `DECISIONS.md`
+  rather than rewriting its original historical framing.
 
 ## License
 

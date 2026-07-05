@@ -210,3 +210,334 @@ non-admin EO member marking "beta test passed" must never auto-trigger promotion
 marker is a no-op for automation, always. It can inform a human admin's decision, but
 must never be wired to fire one itself. Applies to every approval gate in this design,
 not just gem promotion.
+
+# Phase 2 Decisions
+
+Record of the Phase 2 (front door) decisions, worked out collaboratively in 2026-07,
+grounded directly in `AUDIT-ruby4-bundled-gems-suite.md` and
+`AUDIT-ruby4lich5-installer.md` (both in this `docs/` folder) rather than re-derived from
+scratch. Six items; see `ROADMAP-woven-plan.md` Phase 2 for how this fits the build order.
+
+## 1. Tri-state classification
+
+Given a gem name (+ version), classify in this order, cheapest check first:
+
+1. **Pure?** Gemspec has zero `extensions` → pure. Fetch + package, no compile.
+2. **Already precompiled upstream for our exact target platform *and* ABI?** Check for a
+   published version tagged with our target platform (e.g. `x64-mingw-ucrt`) — but the
+   platform tag alone is **not sufficient**. Verified directly against real rubygems.org
+   data: `sqlite3` and `ffi` already ship `x64-mingw-ucrt` builds; `ox`, `curses`,
+   `cairo`, `gtk3`, `glib2` do not (still only the old, pre-UCRT `mingw32` tag, if
+   anything) — confirming why the factory needs to compile the GTK3 stack itself. Even
+   when the platform tag matches, we must actually inspect the gem's contents for our
+   specific target Ruby ABI subdirectory (the `lib/<gem>/<abi>/` convention from Phase 1
+   §2) before trusting it — `required_ruby_version` is too often missing to rely on
+   alone (per the gem-suite audit's §2.3 finding). If present and ABI-matching → **native,
+   pass-through** (use upstream's binary directly, no MSYS2 involved).
+   - **No version-hunting fallback.** If the *specific requested version* doesn't have a
+     matching platform+ABI precompiled build, fall straight through to building that
+     exact version ourselves. Never substitute a different (e.g. earlier) version just
+     because it happens to be precompiled — that would silently ship something other
+     than what was requested and reviewed. This also isn't a capability loss: the
+     build-it-ourselves path is the factory's core proven capability, not a risky
+     fallback, and it's specifically necessary right after adopting a new Ruby ABI, when
+     upstream binaries for it don't exist anywhere yet regardless of maintainer quality.
+3. **Neither of the above** — needs our own compilation. Maps to a known, maintained set
+   of MSYS2 ucrt64 packages → **native-self-contained**, compile it. Doesn't map (a
+   genuinely unvendorable system dependency) → **native-needs-system-lib**, reject
+   loudly rather than guess.
+
+## 2. DLL bundling strategy: consolidate to one mechanism
+
+Per gem-suite audit §2.1/§2.2: two mechanisms exist today and only one actually works.
+`extract-dll-dependencies.rb`'s dependency-aware de-duplication is dead code (its
+gemspec lookup never resolves, since the build harness `chdir`s into the gem directory
+first — it always returns an empty set and never deduplicates anything). The real
+runtime dependency is the broad PowerShell DLL-closure walker that vendors DLLs into
+`glib2`/`cairo`'s `vendor/bin`, relying on load-order + `prepend_dll_path`.
+
+**Decision:** delete the dead per-gem Ruby script entirely; keep the PowerShell closure
+walker. Fixing the dead script's gemspec-path bug would just resurrect a second
+mechanism doing what the closure already does.
+
+**Forward note, not a decision to make now:** this is PowerShell, Windows-only tooling.
+When Linux/macOS are eventually built (Phase 1 §platform scope), native build (build ON
+each target OS/distro, not cross-compilation) is the right approach — Linux's own
+glibc/musl/arch diversity is better handled by building inside a real representative
+container per target than by cross-compiling from one host, and cross-compiling to
+macOS from Linux is genuinely painful and legally murky (osxcross + Apple SDK headers).
+The overall classify → build → vendor-deps → smoke → publish architecture generalizes
+across platforms; the vendor-deps step itself is inherently platform-native tooling
+(PowerShell/DLL-closure on Windows, `ldd`/`patchelf`-shaped on Linux,
+`otool`/`install_name_tool`-shaped on macOS) — three implementations, not one portable
+script.
+
+## 3. Version-literal parameterization + assert-changed patches
+
+Per gem-suite audit §2.4/§2.5: cairo's patch step hardcodes the literal `'1.18.4'` and a
+`= 4.3.\d+` regex; a version drift makes the replace silently no-op (this already cost a
+real red build once, a `%q<pkg-config>` strip miss). Per the roadmap's own instruction,
+this isn't a standalone patch — it's fixed by construction once gem name+version are
+real per-gem inputs instead of hardcoded literals.
+
+Two refinements beyond the audit's own recommendation:
+- **Assert the exact expected match/replacement count**, not just "did anything
+  change." A before/after diff would miss a regex that's slightly too loose and matches
+  the wrong spot — technically non-a-no-op, but still wrong.
+- **Derive the version from the actually-fetched source**, not just the dispatch input
+  string. Read the real version back out of what was actually downloaded and use that
+  for every subsequent patch operation, so a stale cache or wrong URL surfaces
+  immediately as a mismatch rather than patching against an assumption.
+
+## 4. Closure resolution
+
+Reuse RubyGems' own dependency resolver (`Gem::Resolver`, or `bundle lock` against a
+throwaway Gemfile requesting the target gem) rather than hand-rolling a constraint
+solver — consistent with leaning on proven ecosystem tooling wherever it already solves
+the problem (same reasoning as Phase 1's release-resolution mechanism).
+
+- **Topologically sort the resolved set** (leaves first) — formalizes what the current
+  prototype already does by hand for the GTK3 stack (gobject-introspection → cairo →
+  cairo-gobject → pango → atk → gtk3).
+- **Walk bottom-up, checking the curation manifest at each node first.** A compatible
+  already-published version means skip/reuse, not rebuild. Missing or unsatisfied →
+  recursively apply the same classify → build → publish pipeline to that dependency
+  before touching the thing that depends on it.
+- **A `native-needs-system-lib` classification anywhere in the closure fails the whole
+  request loudly** — no partial-success state; you can't ship a gem whose dependency
+  can't be built.
+- Circular runtime dependencies aren't a practical Ruby-ecosystem concern; not building
+  dedicated cycle-handling for a case that doesn't really occur.
+- **Pragmatic caveat:** start with the `Gem::Resolver` path; if it doesn't hold up in
+  practice, adapt without over-investing in defending the original choice.
+
+## 5. Generalized smoke
+
+Reuse the same resolved closure from §4: write it out as a throwaway `Gemfile` and run
+`Bundler.require` against the freshly-baked tree, rather than hand-deriving a require
+path per gem name (which don't always match — `tzinfo-data` requires as `tzinfo/data`,
+not literally `tzinfo-data`). This also solves the audit's Part 3 "undocumented consumer
+load-order contract" finding as a side effect — Bundler already requires gems in
+dependency-resolved order, so there's no separate order to track.
+
+**Scope boundary:** this item is only about making smoke gem-agnostic, not deepening
+what it verifies (a truly clean runner with no MSYS2 on disk, real widget/query checks)
+— that's audit §2.9, explicitly Phase 5.
+
+**Kept exception:** `Gtk.init` stays as a post-require check specifically for GTK3, per
+a real, recurring "installed / no workie" failure history that a bare `require` can't
+catch. Not a precedent for hand-writing bespoke per-gem checks generally — a deliberate,
+narrow exception for one gem with a documented reason, not the default.
+
+**Bundled test-harness reconsumption (additive, informational only):** most well-
+maintained gems ship their own test suite. Best-effort reuse:
+- Scope detection to what's in the package **we already fetched** — a `spec/`/`test/`
+  directory plus something runnable (`Rakefile` with a recognizable task, `.rspec`).
+  Deliberately not also cloning the gem's upstream git repo looking for excluded tests —
+  that adds a second fetch path and a "which URL/tag is authoritative" question for a
+  nice-to-have.
+- Attempt with what's already on hand; don't provision a bundled suite's own dev
+  dependencies (test-only gems, display servers for GUI tests) to force it to run.
+- **Never a hard gate.** Pass, fail, or "present but not runnable here" all just get
+  written into the PR for the human to read. A failing or unattemptable bundled suite
+  doesn't block build/publish — it's a data point for the approval decision, not a
+  second, less-controllable smoke gate.
+
+## 6. Publish mechanism
+
+Reuses the same guard → checkpoint → PR-review → merge-triggers-finalize shape as
+Phase 1 §4's curation mechanism, applied concretely:
+
+1. **Guard:** if the requested gem+version already matches the manifest's current pin,
+   stop — no duplicate release, no no-op PR.
+2. **Checkpoint:** a timestamped backup tag of the manifest's current state before
+   mutating anything.
+3. **Build the full resolved closure** (§4), not just the named gem.
+4. **Upload each built gem as a draft release**, one release/tag per gem-version, before
+   the review step — review happens against the real built artifact and its real
+   checksum, not a promise of one. (Confirmed: acceptable to spend the compute before
+   approval, since a rejected draft release is just deleted.)
+5. **Open one PR per dispatch, not one per gem** — a single upstream bump that touched
+   ten gems (e.g. a GTK3 suite bump) is one coherent manifest diff, reviewed as one
+   change.
+6. **PR merge — an admin's own controlled action — triggers publishing the already-
+   built draft releases**, mirroring `release-on-push-stable.yaml`'s own PR-merge-
+   triggers-publish pattern. Manifest pin and the actual downloadable releases move from
+   draft to live together, at the same approved moment — no window where one is current
+   and the other isn't.
+
+# Phase 5 Decisions
+
+Record of the Phase 5 (hardening/polish) decisions, worked out collaboratively in
+2026-07. Six items from the roadmap; all resolved or deliberately deferred with a
+documented reason.
+
+## 1. DevKit wizard freeze — fix, matching RubyInstaller's own reference pattern
+
+The audit root-caused this precisely: the `[Run]` entry runs `ridk install` with
+`waituntilterminated runhidden`, which blocks the Inno wizard's UI thread for the whole
+of a hidden, minutes-long ~1.5GB MSYS2 download — the wizard looks hung. Of the three
+options the audit offered, going with its top recommendation: move DevKit installation
+to the **finish page** as a `postinstall nowait skipifsilent unchecked` task, running
+`ridk.cmd install` with a visible console instead of hidden — matching RubyInstaller's
+own reference `.iss` exactly (`ShellExec` with `ewNoWait` + `SW_SHOWNORMAL`).
+
+## 2. Duplicate-installs note — documentation only, no fix needed
+
+Audit §2.12 already verified this is expected multi-phase behavior (build → repack →
+smoke produces the same gem installed 2-3 times during the pipeline), not version drift
+— exactly one version of anything ever ships. Just needs a one-line log/comment note so
+a future reader doesn't mistake the repeated install lines for a bug.
+
+## 3. gio2/noise corral — curated known-good DLL list, verified against the real build
+
+Audit §1.2's named-Win32-DLL warnings (29 lines) already have one clear recommended
+rule: if it isn't in the MSYS2 ucrt64 lane, it's OS-provided, full stop. For §1.1's 711
+"assuming system or non-UCRT" notices, rather than picking one of the audit's three
+generic noise-reduction styles, built a real curated baseline from the actual reference
+run's logs (verified directly, not estimated): **44 distinct DLL names** behind the 711
+occurrences (case-insensitive; the raw extraction shows 46, but two are the same DLL
+counted twice under inconsistent casing — `ws2_32.dll`/`WS2_32.dll`,
+`userenv.dll`/`USERENV.dll`). All 44 are exactly the small, stable set you'd expect —
+core Win32 libraries and the standard `api-ms-win-crt-*` Universal CRT api-set
+forwarders — nothing gem-specific.
+
+Mechanism: compare each "assuming system" DLL against the curated list, **case-
+insensitively**. A match is silent — no log line at all. A miss (something not on the
+list) gets a summary line per gem, not per DLL. This also lays the groundwork for audit
+item 1.3 (fail-loud on a genuine miss), which needs exactly this kind of known-good
+baseline to distinguish "known-benign" from "worth a human looking at."
+
+## 4. `.lic`-from-master pinning — deliberately not pinned
+
+Today's installer pulls default convenience scripts (`alias.lic`, `autostart.lic`,
+`go2.lic`, etc.) from `elanthia-online/scripts`' `master` at build time, unpinned.
+Decided to keep it that way, not as an oversight but because the script-update cycle is
+intentionally fluid — a build is routinely "stale" within days of being cut, and that's
+fine, because it's not the only mechanism keeping scripts current. Verified directly:
+`scripts/scripts/repository.lic`'s `SettingsManager` tracks exactly this curated set as
+`Settings['updatable'][:scripts]`, checks each one's remote timestamp on every
+`;repository download-updates` run (widely believed, though not independently confirmed
+by reading `autostart.lic`, to fire automatically on Lich launch), and lets a user pull
+any single item out of that auto-update list via `unset-updatable` — which is exactly
+the per-script pin/opt-out mechanism that makes floating safe at the installer level:
+staleness at build time is smoothed over by the running application's own update cycle,
+and a user who wants a script frozen already has a real, working way to do that
+themselves.
+
+## 5. Code-signing — deferred pending an upcoming policy decision
+
+Not pursued for now; will inform next steps once decided. Nothing in this design
+forecloses adding it later — signing is a post-build step against Inno Setup's single
+finished `.exe`, composes cleanly with (doesn't replace) the checksum/provenance model
+already in place, and the existing test-vs-production installer split (Phase 1 §7)
+already gives a natural "sign production builds only" hook whenever it's adopted.
+
+## 6. Deepen the smoke — split into environment and depth
+
+**Environment (real fix, not yet implemented):** verified directly that this genuinely
+hasn't landed yet. The archived installer-assembly workflow
+(`build-ruby4lich5-installer.yaml`) already smoke-tests on an effectively clean runner,
+but not because job separation was deliberately engineered for it — it never installs
+MSYS2 at all, since it only consumes already-compiled gems from a Release. The actual
+gem-*compilation* workflow (`ruby4-bundled-gems-suite.yml`, the real Phase 2 seed) is
+still a single job: MSYS2 gets installed and smoke runs later in that same job, same
+runner — audit §2.9's exact concern, unresolved. Fix, when Phase 2 gets implemented:
+split gem-compilation and smoke into separate jobs. GitHub Actions jobs are separate VMs
+by default, so this gets a genuinely clean, no-MSYS2-residue environment for free,
+without containers or other infrastructure.
+
+**Depth (no new mechanism needed):** `Gtk.init` stays as the sufficient check, per real
+historical experience — it's the same check already used today to detect corrupted
+installs when supporting Lich5 consumers. Going deeper (real widget creation/render) was
+considered and explicitly not pursued, at least for now. For everything else, the
+generalized bundled-test-suite reuse already designed in Phase 2 §5 *is* the answer to
+"prove it works, not just loads" — not a second, parallel deepening mechanism.
+
+# Phase 3 and Phase 4 — satisfied by Phase 1/2, no separate work
+
+The roadmap's Phase 3 (gems server / index) and most of Phase 4 (installer assembly
+rework) turned out to already be resolved as a side effect of Phase 1 and Phase 2, not
+something requiring its own discussion:
+
+- Phase 3's "stand up the server repo" is moot (Phase 1 §3: one repo, no separate server
+  repo exists). Its "publish mechanism replacing the hand-made test prerelease" is Phase
+  2 §6. Its "curation manifest + checksums" is Phase 1 §2/§4.
+- Phase 4's "repoint the installer workflow at the curated set" is Phase 1 §5/§6/§7 (the
+  EO↔Ruby4Lich5 release flow, baked-tree caching, test/production installer split).
+
+The one genuinely new piece of Phase 4 — gem-suite audit §2.11, redundant default/bundled
+gems — is below.
+
+## Redundant default/bundled gems (§2.11)
+
+Verified directly (filesystem, not the unreliable `Gem::Specification#default_gem?` —
+it reported `false` even for true default gems like `date`/`psych` in this rbenv-managed
+Ruby; the authoritative signal is gemspec placement in `specifications/default/` vs.
+plain `specifications/`): `rexml`, `matrix`, `set`, and `webrick` are **all four bundled
+gems**, not default gems — the audit's original wording singled out `set` as "the
+default gem" as if it were a different category from the other three; on this Ruby
+series it isn't, all four are the same classification.
+
+**Drop `rexml`, `matrix`, `set` from the shipped bundle** — RubyInstaller already
+provides all three; shipping them again is redundant. `rexml`'s presence in `lich-5`'s
+own Gemfile is separately a stale leftover of a since-resolved defect pin, worth cleaning
+up there directly (not a Ruby4Lich5 concern).
+
+**Keep `webrick`**, but not for the reason initially suspected. `mechanize` does declare
+`webrick (~> 1.7)` as a genuine runtime dependency (confirmed against rubygems.org), but
+`mechanize` itself doesn't appear anywhere in `lich-5`, `scripts/scripts`, or
+`lich_repo_mirror` — that chain doesn't apply here. The real, stronger reason:
+`scripts/scripts/webui.lic` directly `require`s `webrick` and runs an actual
+`WEBrick::HTTPServer` with servlets — first-party, direct, deliberate usage. Exactly the
+kind of documented allowlist entry the audit's own exclusion mechanism calls for.
+
+**`matrix` is genuinely needed, just not by us to ship.** Traced the actual dependency
+chain in `lich-5`'s `Gemfile.lock`: `cairo → red-colors → matrix`, entirely inside the
+GTK3/Ruby-GNOME suite. Closure resolution (Phase 2 §4) will correctly find `matrix` as a
+real, declared dependency when resolving `cairo`'s closure — the bundled-gem-exclusion
+filter is what correctly drops it from the *shipped* set anyway, since the base Ruby
+install already satisfies it. Two different, both-correct answers to two different
+questions ("is this needed" vs. "do we need to distribute it").
+
+**`ox`** is confirmed present on both the current `runtime-gems` and `native-runtime-gems`
+workflow inputs — unaffected by this cleanup, and (per earlier verification) one of the
+two gems with no precompiled Windows binary upstream at any version, so it always routes
+to "build it ourselves" under the classification design.
+
+# Phase 6 Decisions
+
+One item, additive by the roadmap's own design — no index redo needed, since Phase 1
+§2's `gem × platform` matrix already accommodates a new Ruby ABI as an additional cell,
+not a restructure.
+
+**Generalize the ABI guard.** The installer-assembly workflow's `ruby-installer-version`
+resolution is hardcoded to a `4.0.x` series today (audit finding, `wf 105`). Fix: make
+the Ruby-series target a real per-build parameter instead of a hardcoded value, so a
+future "Ruby 4.1 installer" variant is a parameter value, not a forked workflow file.
+Everything else a new ABI requires — rebuilding every tracked gem to embed the new ABI's
+binary, keeping the older ABI's installer variant running alongside it — is already
+decided (Phase 1 §2's build-discipline consequence).
+
+# Phase 7 Decisions
+
+Mostly already satisfied by earlier design choices rather than new writing:
+
+- **Consumer load-order contract** — the mechanism is already designed, not just
+  documented: Phase 2 §5's `Bundler.require` reuse means gems get required in
+  dependency-resolved order automatically, as a side effect of reusing Bundler rather
+  than hand-rolling require order. A short written note explaining *why* (for any
+  consumer not going through Bundler) is still worth adding, but the hard part — actually
+  getting load order right — is already solved in the design, not left as a doc-only gap.
+- **ADR** — not adopting a separate ADR-per-file convention. `DECISIONS.md` already
+  serves that role, consolidated by phase rather than one file per decision; a parallel
+  system would be redundant.
+- **Build/release runbook** — deliberately deferred, not skipped. A runbook describing
+  how to operate workflows that don't exist yet risks being wrong the moment
+  implementation differs from plan. Write it once there's real code to document
+  truthfully, not before.
+- **Keep `GEM-FACTORY-vision.md` current** — rather than rewriting its original
+  "sleep-on-it" framing (which would blur what was open *then* vs. resolved *since*), add
+  a short pointer at its top to this file. Preserves the original as a historical
+  snapshot while directing readers to where the current state actually lives.
+

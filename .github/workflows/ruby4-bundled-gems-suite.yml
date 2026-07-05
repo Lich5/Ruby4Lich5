@@ -4,6 +4,10 @@
 # Not yet refactored. Known stale spot: the glib2-gc-repair input below still assumes the
 # old cache-ruby-property-setter-values patch approach, which the 2026-07-03 GC.compact
 # fix in lich5-gtk3-gems (rb-gi-loader.c) replaces with rb_gc_register_mark_object.
+# Also stale: the upload-artifact step below is still @v4 (Node 20; lich5-gtk3-gems never
+# got the fix that elanthia-online/lich-5's own CI already has). Not urgent by itself
+# (Node 20 is removed from runners 2026-09-16, not before), but fix it when this file gets
+# rewritten for Phase 2 rather than patching it standalone now.
 name: Build Ruby4 Bundled Gems Suite
 
 on:
