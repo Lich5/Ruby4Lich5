@@ -249,7 +249,7 @@ jobs:
           }
           New-Item -ItemType Directory -Path $rubyParent -Force | Out-Null
 
-          Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
+          Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing -TimeoutSec 60
           if (!(Test-Path $archive)) {
             Write-Error "RubyInstaller download failed: expected archive $archive was not created."
             exit 1
@@ -1170,7 +1170,7 @@ jobs:
           $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION
           $archive = Join-Path $env:RUNNER_TEMP "rubyinstaller-$rubyInstallerVersion-x64.7z"
           $url = "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-$rubyInstallerVersion/rubyinstaller-$rubyInstallerVersion-x64.7z"
-          Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
+          Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing -TimeoutSec 60
           if (!(Test-Path $archive)) {
             Write-Error "Clean packaged smoke failed: RubyInstaller download failed; expected archive $archive was not created."
             exit 1
