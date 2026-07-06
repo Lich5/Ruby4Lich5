@@ -1,0 +1,245 @@
+name: Build Ruby4Lich5 Installer (baked)
+
+# Lives on Lich5/lich-5 (the build/test fork). Builds the baked, non-DevKit
+# installer: a stock RubyInstaller tree (installed via .exe with /components=ruby) with the precompiled binary gems
+# gem-installed straight in on the runner (no MSYS2, no compile, no prune), plus
+# the Lich payload. The installer just lays the finished tree down -- one app,
+# file-copy fast. Compiles Ruby4Lich5-installer.iss with Inno Setup.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ruby-series:
+        description: "RubyInstaller series to resolve to its latest patch (ABI-locked to the gems)."
+        required: false
+        default: "4.0"
+      gem-repo:
+        description: "Repo publishing the gem-bundle Release."
+        required: false
+        default: "Lich5/lich5-gtk3-gems"
+      gem-release-tag:
+        description: "Gem-bundle Release tag to pull. Empty = newest release (incl. prerelease)."
+        required: false
+        default: ""
+      lich-tag:
+        description: "Lich ref/tag to build from. Empty = the ref this workflow is dispatched on."
+        required: false
+        default: ""
+      app-version:
+        description: "Lich version label (feeds LichVersion, not InstallerVersion -- see docs/DECISIONS.md Phase 1 section 4/5). Empty = read .release-please-manifest.json, else 0.0.0-dev."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build_lich_payload:
+    name: Assemble Lich payload
+    runs-on: ubuntu-latest
+    steps:
+      # Explicit repository: this job assembles the Lich payload from Lich's own source,
+      # which lives in elanthia-online/lich-5 -- a different repo from wherever this
+      # workflow file itself lives. Without repository: set, actions/checkout defaults to
+      # the current repo, which does not contain lich.rbw/Gemfile/lib below and would fail
+      # this step outright.
+      - name: Checkout Lich source
+        uses: actions/checkout@v5
+        with:
+          repository: elanthia-online/lich-5
+          ref: ${{ inputs.lich-tag }}
+          fetch-depth: 0
+
+      # Verbatim from rebuild-release-assets.yaml -- the "flawless for months" assembly.
+      - name: Create core Lich-5 package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p Lich5 Lich5/data Lich5/scripts
+          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/alias.lic         > Lich5/scripts/alias.lic
+          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/autostart.lic     > Lich5/scripts/autostart.lic
+          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/ewaggle.lic       > Lich5/scripts/ewaggle.lic
+          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/go2.lic           > Lich5/scripts/go2.lic
+          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/jinx.lic          > Lich5/scripts/jinx.lic
+          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/lich5-update.lic  > Lich5/scripts/lich5-update.lic
+          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/log.lic           > Lich5/scripts/log.lic
+          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/map.lic           > Lich5/scripts/map.lic
+          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/repository.lic    > Lich5/scripts/repository.lic
+          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/vars.lic          > Lich5/scripts/vars.lic
+          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/version.lic       > Lich5/scripts/version.lic
+          curl -fsSL https://raw.githubusercontent.com/elanthia-online/dr-scripts/master/dependency.lic         > Lich5/scripts/dependency.lic
+          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/effect-list.xml   > Lich5/data/effect-list.xml
+          cp lich.rbw Lich5/
+          cp Gemfile  Lich5/
+          cp LICENSE  Lich5/
+          cp -r lib   Lich5/
+          zip -qr lich-5.zip Lich5/
+
+      - name: Upload Lich payload
+        uses: actions/upload-artifact@v5
+        with:
+          name: lich-payload
+          path: lich-5.zip
+          if-no-files-found: error
+
+  build_installer:
+    name: Build installer (windows)
+    needs: build_lich_payload
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # No repository:/ref: here on purpose -- installer assets (Ruby4Lich5-installer.iss,
+      # fly64.ico) live in this workflow's own repo, at the commit this workflow is
+      # actually running from, independent of whatever Lich ref is being built. Using
+      # lich-tag here (as the previous version of this file did) meant a valid Lich ref
+      # could point at a commit where these files don't exist, or vice versa.
+      - name: Checkout installer assets
+        uses: actions/checkout@v5
+
+      - name: Restore Lich payload
+        uses: actions/download-artifact@v5
+        with:
+          name: lich-payload
+      - name: Expand Lich payload
+        shell: bash
+        run: unzip -q lich-5.zip      # -> .\Lich5\
+
+      - name: Resolve latest RubyInstaller in series
+        shell: powershell
+        run: |
+          # Not an ABI compatibility guard -- per docs/DECISIONS.md Phase 6, ruby-series is
+          # a real per-build parameter, not hardcoded to one literal value, so a future ABI
+          # variant is a parameter value, not a forked workflow file. This only validates
+          # format; it does not check gem-repo/gem-release-tag actually matches ruby-series
+          # (the same trust already extended to every other input here). Only one Ruby ABI
+          # (4.0.x) is real today, so this is untested against an actual mismatch -- revisit
+          # with real manifest/metadata validation once a second ABI (e.g. 4.1.x) exists.
+          $series = '${{ inputs.ruby-series }}'
+          if ($series -notmatch '^\d+\.\d+$') { Write-Error "ruby-series must look like 4.0; got '$series'."; exit 1 }
+          $escaped = [regex]::Escape($series)
+          $rels = gh api repos/oneclick/rubyinstaller2/releases --paginate | ConvertFrom-Json
+          $rel = $rels |
+            Where-Object { $_.tag_name -match "^RubyInstaller-$escaped\.\d+-\d+$" } |
+            Sort-Object { [version]($_.tag_name -replace '^RubyInstaller-([\d.]+)-\d+$', '$1') },
+                        { [int]($_.tag_name -replace '^RubyInstaller-[\d.]+-(\d+)$', '$1') } |
+            Select-Object -Last 1
+          if (-not $rel) { Write-Error "No RubyInstaller release for series $series."; exit 1 }
+          $tag = $rel.tag_name -replace '^RubyInstaller-', ''
+          $rubyVersion = ($tag -split '-')[0]
+          $exeName = "rubyinstaller-$tag-x64.exe"     # run on the runner with /components to avoid docs/msys2
+          $asset = $rel.assets | Where-Object { $_.name -eq $exeName }
+          if (-not $asset) { Write-Error "Asset $exeName not found on $($rel.tag_name)."; exit 1 }
+          "RUBY_VERSION=$rubyVersion"       | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RUBY_EXE_URL=$($asset.browser_download_url)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "RubyInstaller $tag -> $exeName"
+
+      - name: Install Ruby tree to .\ruby (no rdoc, no MSYS2 -- avoided, not stripped)
+        shell: powershell
+        run: |
+          # /components is an allowlist (default ruby,rdoc,msys2). Passing only
+          # 'ruby' never writes rdoc docs or the MSYS2 toolchain. Run on the
+          # runner (throwaway registration); we ship the resulting tree, not the .exe.
+          Invoke-WebRequest -Uri $env:RUBY_EXE_URL -OutFile rubyinstaller.exe -UseBasicParsing
+          $ruby = Join-Path $PWD 'ruby'
+          Start-Process -FilePath .\rubyinstaller.exe -Wait -ArgumentList `
+            '/verysilent','/norestart','/currentuser',"/dir=$ruby",'/components=ruby','/tasks=nomodpath,noassocfiles,noridkinstall'
+          if (!(Test-Path "$ruby\bin\ruby.exe")) { Write-Error "$ruby\bin\ruby.exe missing after install."; exit 1 }
+          & "$ruby\bin\ruby.exe" -v
+
+      - name: Fetch gem bundle from Release (public, no secret)
+        shell: powershell
+        run: |
+          $repo = '${{ inputs.gem-repo }}'
+          $tag  = '${{ inputs.gem-release-tag }}'
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = gh api "repos/$repo/releases" --jq '.[0].tag_name'
+            if ([string]::IsNullOrWhiteSpace($tag)) { Write-Error "No releases on $repo."; exit 1 }
+          }
+          Write-Host "Gem bundle release: $repo @ $tag"
+          "GEM_BUNDLE_VERSION=$tag" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          gh release download $tag --repo $repo --pattern '*.zip' --dir .
+          # Fail loudly on zero or multiple candidates rather than silently taking
+          # whichever one Get-ChildItem happens to return first -- picking blindly here
+          # would produce a wrong, unnoticed installer if a release ever ships more than
+          # one non-lich-5 zip asset.
+          $candidates = @(Get-ChildItem -Filter '*.zip' | Where-Object { $_.Name -ne 'lich-5.zip' })
+          if ($candidates.Count -eq 0) { Write-Error "Gem-bundle zip not found in release $tag."; exit 1 }
+          if ($candidates.Count -gt 1) {
+            Write-Error "Ambiguous gem-bundle zip in release $tag`: found $($candidates.Count) candidates ($($candidates.Name -join ', ')), expected exactly 1."
+            exit 1
+          }
+          $zip = $candidates[0]
+          New-Item -ItemType Directory -Path .\gembundle -Force | Out-Null
+          Expand-Archive -Path $zip.FullName -DestinationPath .\gembundle -Force
+          if (-not (Get-ChildItem .\gembundle -Filter 'install-runtime-gems.cmd' -Recurse)) { Write-Error "install-runtime-gems.cmd missing."; exit 1 }
+
+      - name: Bake gems into the Ruby tree (gem install --local, no compile)
+        shell: powershell
+        run: |
+          $rubyBin = Join-Path $PWD 'ruby\bin'
+          $env:Path = "$rubyBin;$env:Path"
+          # The shipped install-runtime-gems.cmd loops `gem install`; calling gem.cmd
+          # (a batch file) inside a FOR block without `call` corrupts cwd after the
+          # first gem, so --local can't find the rest. Bypass it: one direct gem
+          # install of all targets from the bundle dir (same as the factory smoke).
+          $bundle  = (Get-ChildItem .\gembundle -Filter 'runtime-gems-install-targets.txt' -Recurse | Select-Object -First 1).Directory.FullName
+          $targets = Get-Content (Join-Path $bundle 'runtime-gems-install-targets.txt') | Where-Object { $_.Trim() }
+          Write-Host "Baking $($targets.Count) targets from $bundle"
+          Push-Location $bundle
+          & "$rubyBin\gem.cmd" install --local --no-document --force @targets
+          $code = $LASTEXITCODE
+          Pop-Location
+          if ($code -ne 0) { Write-Error "Gem bake failed (exit $code)."; exit $code }
+          Write-Host "::group::Installed gems"
+          & "$rubyBin\gem.cmd" list --local
+          Write-Host "::endgroup::"
+
+      - name: Smoke the baked tree (loads on the runner before we ship it)
+        shell: powershell
+        run: |
+          $ruby = Join-Path $PWD 'ruby\bin\ruby.exe'
+          & $ruby -e "require 'gtk3'; require 'sqlite3'; require 'sequel'; require 'ox'; require 'curses'; Gtk.init; puts 'baked tree OK: ' + RUBY_DESCRIPTION"
+          if ($LASTEXITCODE -ne 0) { Write-Error "Baked Ruby tree failed to load the runtime gems."; exit 1 }
+
+      # Resolves the Lich payload's own version -- docs/DECISIONS.md Phase 1 section 4/5:
+      # installer versioning is owned by Ruby4Lich5, not by lich-5, so this is deliberately
+      # read (not generated) and feeds only LichVersion, not InstallerVersion. Renamed from
+      # the prototype's "app-version"/APP_VERSION, which conflated the two.
+      - name: Resolve Lich version
+        shell: powershell
+        run: |
+          $v = '${{ inputs.app-version }}'
+          if ([string]::IsNullOrWhiteSpace($v) -and (Test-Path .release-please-manifest.json)) {
+            $v = (Get-Content .release-please-manifest.json -Raw | ConvertFrom-Json).'.'
+          }
+          if ([string]::IsNullOrWhiteSpace($v)) { $v = '0.0.0-dev' }
+          "LICH_VERSION=$v" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Lich version: $v"
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: |
+          choco feature disable -n=showDownloadProgress
+          choco install -y --no-progress innosetup
+
+      # InstallerVersion is deliberately not passed here -- Ruby4Lich5's own installer-build
+      # identity has no source yet (that's Phase 2 section 6's publish mechanism, not this fix); the
+      # .iss's own #ifndef default applies until that exists.
+      - name: Compile installer
+        shell: powershell
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) { Write-Error "ISCC not found at $iscc."; exit 1 }
+          & $iscc "/DRubyVersion=$env:RUBY_VERSION" "/DLichVersion=$env:LICH_VERSION" "/DGemBundleVersion=$env:GEM_BUNDLE_VERSION" "Ruby4Lich5-installer.iss"
+          if ($LASTEXITCODE -ne 0) { Write-Error "Inno Setup compile failed."; exit $LASTEXITCODE }
+          if (!(Test-Path .\Output\Ruby4Lich5.exe)) { Write-Error "Output\Ruby4Lich5.exe not produced."; exit 1 }
+          Get-Item .\Output\Ruby4Lich5.exe | ForEach-Object { Write-Host "Built: $($_.Name) ($([math]::Round($_.Length/1MB,1)) MB)" }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v5
+        with:
+          name: ruby4lich5-installer
+          path: .\Output\Ruby4Lich5.exe
+          if-no-files-found: error
