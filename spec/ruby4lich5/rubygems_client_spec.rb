@@ -86,6 +86,35 @@ RSpec.describe Ruby4Lich5::RubygemsClient do
     end
   end
 
+  describe '#asset_filename' do
+    it 'omits the platform segment for the ruby-platform source gem' do
+      client = described_class.new(http_get: unused_http_get)
+
+      expect(client.asset_filename('sqlite3', '1.7.3', 'ruby')).to eq('sqlite3-1.7.3.gem')
+    end
+
+    it 'includes the platform segment for a platform-qualified gem' do
+      client = described_class.new(http_get: unused_http_get)
+
+      expect(client.asset_filename('sqlite3', '1.7.3', 'x64-mingw-ucrt')).to eq('sqlite3-1.7.3-x64-mingw-ucrt.gem')
+    end
+
+    it 'raises ArgumentError for a Symbol platform rather than silently building the wrong filename' do
+      # Regression: a Symbol :ruby is never == the String literal 'ruby', so
+      # the platform == 'ruby' branch would silently take the *other* path
+      # and produce "sqlite3-1.7.3-ruby.gem" instead of "sqlite3-1.7.3.gem"
+      # if SafeToken accepted and coerced non-String input instead of
+      # rejecting it outright. gem_name and version are kept as valid Strings
+      # here specifically so this isolates the platform check -- a Symbol
+      # gem name would raise on that validation first and never actually
+      # exercise the platform path this example is about.
+      client = described_class.new(http_get: unused_http_get)
+
+      expect { client.asset_filename('sqlite3', '1.7.3', :ruby) }
+        .to raise_error(ArgumentError, /must be a String, got Symbol/)
+    end
+  end
+
   describe '#download_gem' do
     it 'requests the ruby-platform filename when no platform is given' do
       requested_uri = nil
