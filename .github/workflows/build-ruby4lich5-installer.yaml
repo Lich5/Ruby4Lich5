@@ -37,6 +37,7 @@ jobs:
   build_lich_payload:
     name: Assemble Lich payload
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       # Explicit repository: this job assembles the Lich payload from Lich's own source,
       # which lives in elanthia-online/lich-5 -- a different repo from wherever this
@@ -49,6 +50,7 @@ jobs:
           repository: elanthia-online/lich-5
           ref: ${{ inputs.lich-tag }}
           fetch-depth: 0
+          persist-credentials: false
 
       # Verbatim from rebuild-release-assets.yaml -- the "flawless for months" assembly.
       - name: Create core Lich-5 package
