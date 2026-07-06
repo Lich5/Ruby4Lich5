@@ -37,5 +37,18 @@ module Ruby4Lich5
       pattern = %r{^lib/#{Regexp.escape(@spec.name)}/#{Regexp.escape(ruby_abi)}/}
       @spec.files.any? { |f| f.match?(pattern) }
     end
+
+    # @return [Boolean] true when the package includes its own +spec/+ or
+    #   +test/+ directory plus a +Rakefile+ -- the signal used for
+    #   best-effort bundled-test-suite reuse (docs/DECISIONS.md Phase 2 SS5).
+    #   Deliberately scoped to what's in the package we already fetched, not
+    #   the gem's upstream git repo (which might have tests excluded from
+    #   the packaged gem) -- that would mean a second fetch path and a
+    #   "which URL/tag is authoritative" question for what's explicitly a
+    #   nice-to-have, not a requirement.
+    def runnable_test_suite?
+      has_test_dir = @spec.files.any? { |f| f.start_with?('spec/', 'test/') }
+      has_test_dir && @spec.files.include?('Rakefile')
+    end
   end
 end
