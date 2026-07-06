@@ -100,4 +100,55 @@ RSpec.describe Ruby4Lich5::GemInspector do
       end
     end
   end
+
+  describe '#runnable_test_suite?' do
+    context 'when the package has a spec/ directory and a Rakefile' do
+      it 'returns true' do
+        path = build_fixture_gem(
+          name: 'testedfixture',
+          extra_files: ['lib/testedfixture.rb', 'spec/testedfixture_spec.rb', 'Rakefile']
+        )
+
+        expect(described_class.new(path).runnable_test_suite?).to be(true)
+      end
+    end
+
+    context 'when the package has a test/ directory and a Rakefile' do
+      it 'returns true' do
+        path = build_fixture_gem(
+          name: 'testedfixture',
+          extra_files: ['lib/testedfixture.rb', 'test/testedfixture_test.rb', 'Rakefile']
+        )
+
+        expect(described_class.new(path).runnable_test_suite?).to be(true)
+      end
+    end
+
+    context 'when the package has tests but no Rakefile to run them with' do
+      it 'returns false' do
+        path = build_fixture_gem(
+          name: 'untestedfixture',
+          extra_files: ['lib/untestedfixture.rb', 'spec/untestedfixture_spec.rb']
+        )
+
+        expect(described_class.new(path).runnable_test_suite?).to be(false)
+      end
+    end
+
+    context 'when the package has a Rakefile but no test directory' do
+      it 'returns false' do
+        path = build_fixture_gem(name: 'untestedfixture', extra_files: ['lib/untestedfixture.rb', 'Rakefile'])
+
+        expect(described_class.new(path).runnable_test_suite?).to be(false)
+      end
+    end
+
+    context 'when the package has neither' do
+      it 'returns false' do
+        path = build_fixture_gem(name: 'untestedfixture', extra_files: ['lib/untestedfixture.rb'])
+
+        expect(described_class.new(path).runnable_test_suite?).to be(false)
+      end
+    end
+  end
 end
