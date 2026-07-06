@@ -13,6 +13,12 @@
 /.bundle/
 /lib/bundler/man/
 
+# Dev/lint-only tooling deps (rspec, rubocop) -- not runtime code the
+# factory's output depends on, so pinning exact versions in git isn't
+# protecting reproducibility of anything shipped. Revisit once the Gemfile
+# picks up real runtime dependencies.
+Gemfile.lock
+
 .rvmrc
 .ruby-version.local
 

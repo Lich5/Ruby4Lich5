@@ -444,10 +444,6 @@ jobs:
             # ones (cairo) write the serialized %q<pkg-config> form, so match both.
             $content = $content -replace '(?m)^.*add_runtime_dependency.*pkg-config.*\r?\n', ''
             $content = $content -replace '(?m)^.*add_runtime_dependency.*native-package-installer.*\r?\n', ''
-            if ($gemName -eq 'cairo') {
-              $content = $content.Replace('1.18.4', $cairoVersion)
-              $content = $content -replace '= 4\.3\.\d+', "= $rubyGnomeVersion"
-            }
             if ($content -notmatch 's\.platform\s*=') {
               $content = $content -replace '(s\.version\s*=.*\r?\n)', "`$1  s.platform      = Gem::Platform.new('$platform')`n"
             }
@@ -457,6 +453,14 @@ jobs:
             Write-Text $gemspec $content
           }
 
+          # Future work: Insert-Before/Replace-Required below are inline
+          # string-substitution patches. A real-diff-based PatchApplier
+          # mechanism (planned, separate feat/ branch) will be the home for
+          # patches that are genuine source code changes -- e.g. glib2's
+          # GC-safety fix, GObject-Introspection's fix -- since regex-replace
+          # doesn't handle multi-line C changes well. These existing simple
+          # require-path patches are small and working; migrating them isn't
+          # free, so they're left as-is here deliberately, not an oversight.
           function Insert-Before([string] $path, [string] $needle, [string] $insert) {
             $content = Read-Text $path
             if ($content.Contains($insert.Trim())) {
