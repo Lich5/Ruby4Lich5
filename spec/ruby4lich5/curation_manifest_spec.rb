@@ -46,5 +46,14 @@ RSpec.describe Ruby4Lich5::CurationManifest do
     it 'defaults to an empty manifest when constructed with no data' do
       expect(described_class.new.satisfied?('sqlite3', '1.7.3', 'x64-mingw-ucrt')).to be(false)
     end
+
+    context 'regression: a platform entry that is null or otherwise not a Hash' do
+      it 'treats it as unsatisfied instead of raising' do
+        malformed = described_class.new('sqlite3' => { 'x64-mingw-ucrt' => nil, 'arm64-darwin' => 'not-a-hash' })
+
+        expect(malformed.satisfied?('sqlite3', '1.7.3', 'x64-mingw-ucrt')).to be(false)
+        expect(malformed.satisfied?('sqlite3', '1.7.3', 'arm64-darwin')).to be(false)
+      end
+    end
   end
 end

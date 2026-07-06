@@ -47,7 +47,7 @@ module Ruby4Lich5
     def normalize(data)
       data.each_with_object({}) do |(gem_name, platforms), by_gem|
         by_gem[gem_name.to_s] = platforms.each_with_object({}) do |(platform, entry), by_platform|
-          by_platform[platform.to_s] = entry.transform_keys(&:to_sym)
+          by_platform[platform.to_s] = entry.is_a?(Hash) ? entry.transform_keys(&:to_sym) : {}
         end
       end
     end
