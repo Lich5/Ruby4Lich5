@@ -733,6 +733,34 @@ jobs:
               Sort-Object -Unique)
           }
 
+          # Curated known-good baseline, verified directly against the real reference
+          # build's logs (Lich5/lich5-gtk3-gems run 27508683541): every DLL the closure
+          # walker below has ever seen outside the MSYS2 ucrt64 lane, case-insensitive.
+          # All 44 are core Win32 libraries and api-ms-win-crt-* Universal CRT api-set
+          # forwarders -- nothing gem-specific. A match is silent (genuinely benign,
+          # OS-provided, per docs/DECISIONS.md Phase 5 section 3); a miss still gets reported,
+          # just once per build instead of once per occurrence -- 711 near-identical
+          # notice lines otherwise, all noise, burying any real signal.
+          $knownSystemDlls = [System.Collections.Generic.HashSet[string]]::new(
+            [string[]] @(
+              'advapi32.dll', 'api-ms-win-core-synch-l1-2-0.dll', 'api-ms-win-crt-conio-l1-1-0.dll',
+              'api-ms-win-crt-convert-l1-1-0.dll', 'api-ms-win-crt-environment-l1-1-0.dll',
+              'api-ms-win-crt-filesystem-l1-1-0.dll', 'api-ms-win-crt-heap-l1-1-0.dll',
+              'api-ms-win-crt-locale-l1-1-0.dll', 'api-ms-win-crt-math-l1-1-0.dll',
+              'api-ms-win-crt-multibyte-l1-1-0.dll', 'api-ms-win-crt-private-l1-1-0.dll',
+              'api-ms-win-crt-process-l1-1-0.dll', 'api-ms-win-crt-runtime-l1-1-0.dll',
+              'api-ms-win-crt-stdio-l1-1-0.dll', 'api-ms-win-crt-string-l1-1-0.dll',
+              'api-ms-win-crt-time-l1-1-0.dll', 'api-ms-win-crt-utility-l1-1-0.dll',
+              'bcrypt.dll', 'bcryptprimitives.dll', 'comctl32.dll', 'comdlg32.dll', 'dnsapi.dll',
+              'dwmapi.dll', 'dwrite.dll', 'gdi32.dll', 'gdiplus.dll', 'hid.dll', 'imm32.dll',
+              'iphlpapi.dll', 'kernel32.dll', 'msimg32.dll', 'ntdll.dll', 'ole32.dll',
+              'opengl32.dll', 'rpcrt4.dll', 'setupapi.dll', 'shell32.dll', 'shlwapi.dll',
+              'user32.dll', 'userenv.dll', 'usp10.dll', 'winmm.dll', 'winspool.drv', 'ws2_32.dll'
+            ),
+            [StringComparer]::OrdinalIgnoreCase
+          )
+          $unrecognizedSystemDlls = [System.Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
           $runtimeDlls = [System.Collections.Hashtable]::new([StringComparer]::OrdinalIgnoreCase)
           function Add-DllClosure([string] $dllName) {
             if ([string]::IsNullOrWhiteSpace($dllName)) {
@@ -740,7 +768,9 @@ jobs:
             }
             $dllPath = Join-Path $prefixBin $dllName
             if (!(Test-Path $dllPath)) {
-              Write-Host "::notice::Runtime DLL dependency $dllName is not in $prefixBin; assuming system or non-UCRT dependency."
+              if (-not $knownSystemDlls.Contains($dllName)) {
+                [void] $unrecognizedSystemDlls.Add($dllName)
+              }
               return
             }
             if ($runtimeDlls.ContainsKey($dllName)) {
@@ -830,6 +860,10 @@ jobs:
             & "$msys\$prefix\bin\gdk-pixbuf-query-loaders.exe" | Set-Content (Join-Path $cacheDst 'loaders.cache.in')
             (Get-Content (Join-Path $cacheDst 'loaders.cache.in') -Raw).Replace($loaderDst, '@@MODULEDIR@@') |
               Set-Content (Join-Path $cacheDst 'loaders.cache.in') -Encoding ascii
+          }
+
+          if ($unrecognizedSystemDlls.Count -gt 0) {
+            Write-Host "::notice::$($unrecognizedSystemDlls.Count) DLL dependency(ies) outside the MSYS2 ucrt64 lane and not on the known-good system list (docs/DECISIONS.md Phase 5 section 3) -- assumed system-provided, but worth a human look: $($unrecognizedSystemDlls -join ', ')"
           }
 
           foreach ($target in @('glib2', 'cairo')) {
