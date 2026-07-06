@@ -1,20 +1,20 @@
-; Ruby4Lich5 — baked installer (non-DevKit, binary-gem factory model)
+; Ruby4Lich5 -- baked installer (non-DevKit, binary-gem factory model)
 ;
 ; The Ruby tree is built on the CI runner: stock RubyInstaller (.7z) extracted,
 ; then the precompiled binary gems are `gem install --local`'d straight into it.
-; No MSYS2, no compilation, no prune — the binary gems are self-contained
+; No MSYS2, no compilation, no prune -- the binary gems are self-contained
 ; (they vendor their own DLLs). This installer just lays that finished tree down:
 ; one app, file-copy fast, responsive. DevKit stays optional via ridk.
 ;
 ; Build-time injected defines (workflow passes via ISCC /D...):
 ;   RubyVersion       e.g. 4.0.5 (resolved "latest 4.0.x")
 ;   LichVersion        the Lich release actually bundled -- read from whichever lich-tag
-;                      was fetched, not generated; see docs/DECISIONS.md Phase 1 §5.
+;                      was fetched, not generated; see docs/DECISIONS.md Phase 1, item 5.
 ;   GemBundleVersion   the Ruby4Lich5 gem-bundle release actually baked in (stopgap
-;                      placeholder until Phase 2 §6's publish mechanism exists)
+;                      placeholder until Phase 2, item 6's publish mechanism exists)
 ;   InstallerVersion   Ruby4Lich5's own installer-build identity -- independent of both
 ;                      of the above; installer versioning is owned by Ruby4Lich5, not by
-;                      lich-5 (docs/DECISIONS.md Phase 1 §4)
+;                      lich-5 (docs/DECISIONS.md Phase 1, item 4)
 
 #ifndef RubyVersion
   #define RubyVersion "4.0.5"
@@ -91,7 +91,7 @@ Source: ".\Lich5\*";   DestDir: "{app}\R4LInstall\Lich{#LichVersion}";  Componen
 
 [Registry]
 ; We lay down a tree (no RubyInstaller run), so we set associations + PATH ourselves.
-; Restored verbatim from the legacy R4LGTK3.iss — proven for months.
+; Restored verbatim from the legacy R4LGTK3.iss -- proven for months.
 Root: HKCU; Subkey: "SOFTWARE\Classes\.rb";                          ValueType: string; ValueName: ""; ValueData: "RubyFile";                                         Components: rubygem; Flags: uninsdeletevalue uninsdeletekeyifempty
 Root: HKCU; Subkey: "SOFTWARE\Classes\.rbw";                         ValueType: string; ValueName: ""; ValueData: "RubyWFile";                                        Components: rubygem; Flags: uninsdeletevalue uninsdeletekeyifempty
 Root: HKCU; Subkey: "SOFTWARE\Classes\RubyFile";                     ValueType: string; ValueName: ""; ValueData: "RubyFile";                                         Components: rubygem; Flags: uninsdeletekey
@@ -106,14 +106,14 @@ Root: HKCU; Subkey: "SOFTWARE\Classes\RubyWFile\shell\open\command"; ValueType: 
 Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{app}\{#RubyVersion}\bin;{olddata}"; Components: rubygem; Flags: preservestringtype
 
 [Run]
-; Optional DevKit for developers — ridk ships in the baked tree; pulls ~1.5GB of
+; Optional DevKit for developers -- ridk ships in the baked tree; pulls ~1.5GB of
 ; MSYS2 over the network. Offered as a finish-page checkbox (postinstall), not a
 ; Tasks-page one: running this hidden mid-wizard (the old waituntilterminated
 ; runhidden combination) blocked the wizard's UI thread for the whole download,
 ; making Setup look hung. nowait + a visible console instead matches
 ; RubyInstaller's own reference .iss for this exact step.
 Filename: "{app}\{#RubyVersion}\bin\ridk.cmd"; Parameters: "install 2 3"; \
-  Description: "Install Ruby DevKit (developers — downloads MSYS2, needs network)"; \
+  Description: "Install Ruby DevKit (developers -- downloads MSYS2, needs network)"; \
   Components: rubygem; Flags: postinstall nowait skipifsilent unchecked
 
 ; Place Lich where the user chose (unchanged from the legacy installer).

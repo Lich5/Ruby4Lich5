@@ -114,9 +114,9 @@ jobs:
               if [[ "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
                 ensure_latest_for_repo "$owner_repo"
                 if [[ -n "${latest_sha[$owner_repo]}" && "$ref" == "${latest_sha[$owner_repo]}" ]]; then
-                  list_sha_current+=("• $f:$lineno uses: $uses — current at ${latest_tag[$owner_repo]}")
+                  list_sha_current+=("- $f:$lineno uses: $uses -- current at ${latest_tag[$owner_repo]}")
                 else
-                  list_sha_new+=("• $f:$lineno uses: $uses — new at ${latest_tag[$owner_repo]:-(no-tags)}")
+                  list_sha_new+=("- $f:$lineno uses: $uses -- new at ${latest_tag[$owner_repo]:-(no-tags)}")
                 fi
               fi
             done < <(grep -nE '^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]*[^#]+' "$f" || true)
@@ -132,7 +132,7 @@ jobs:
 
               ref="${uses##*@}"
               if [[ ! "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
-                list_non_sha+=("• $f:$lineno uses: $uses")
+                list_non_sha+=("- $f:$lineno uses: $uses")
                 ((non_sha++)) || true
               fi
             done < <(grep -nE '^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]*[^#]+' "$f" || true)
@@ -143,10 +143,10 @@ jobs:
             echo "#### Non-SHA refs (excluding local and docker)"
             for x in "${list_non_sha[@]:-}"; do echo "$x"; done
             echo ""
-            echo "#### SHA refs that require updates (new at …)"
+            echo "#### SHA refs that require updates (new at ...)"
             for x in "${list_sha_new[@]:-}"; do echo "$x"; done
             echo ""
-            echo "#### SHA refs that are current (current at …)"
+            echo "#### SHA refs that are current (current at ...)"
             for x in "${list_sha_current[@]:-}"; do echo "$x"; done
           } >> "$GITHUB_STEP_SUMMARY"
 

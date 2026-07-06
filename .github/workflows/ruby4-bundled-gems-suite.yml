@@ -577,7 +577,7 @@ jobs:
             }
             $loader = Read-Text $loaderPath
             # loader.rb lives at <gem>/lib/<gem>/loader.rb, so the gem name is
-            # the leaf of its immediate parent dir (one -Parent, not two — two
+            # the leaf of its immediate parent dir (one -Parent, not two -- two
             # yields "lib", so the require "<gem>.so" rewrite never matches).
             $gemName = Split-Path (Split-Path $loaderPath -Parent) -Leaf
             $moduleName = $gemName
@@ -1120,6 +1120,38 @@ jobs:
             }
           }
 
+      # Relays the built gem bundle to the smoke job below, which runs on its own
+      # fresh VM (per docs/DECISIONS.md Phase 5 section 6 -- separate jobs are separate
+      # runners, so $GITHUB_ENV/the filesystem can't carry state across the
+      # boundary the way they do between steps in the same job). Short retention:
+      # this only ever needs to survive from the end of this job to the start of
+      # the next one, minutes apart within the same run -- distinct from the real,
+      # 90-day-retention final artifact the smoke job uploads once it's done.
+      - name: Upload packaged runtime gem bundle (intermediate, cross-job relay)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ruby4-bundled-gems-pkg-dir-intermediate
+          path: pkg/*
+          retention-days: 1
+          if-no-files-found: error
+
+  smoke_ruby4_bundled_gems_suite:
+    name: Smoke packaged Ruby4 bundled gems suite (windows-ucrt64)
+    needs: build_ruby4_bundled_gems_suite
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    env:
+      RUBY_INSTALLER_VERSION: ${{ inputs.ruby-installer-version }}
+      PKG_DIR: ${{ github.workspace }}\pkg
+
+    steps:
+      - name: Download packaged runtime gem bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ruby4-bundled-gems-pkg-dir-intermediate
+          path: pkg
+
       - name: Smoke packaged runtime gem bundle on clean RubyInstaller
         shell: powershell
         run: |
@@ -1131,10 +1163,16 @@ jobs:
             exit 1
           }
 
+          # This job runs on its own fresh VM (docs/DECISIONS.md Phase 5 section 6), so
+          # unlike when this step ran in the same job as the initial RubyInstaller
+          # download, there is nothing already cached at $env:RUNNER_TEMP to
+          # extract -- download it directly instead.
           $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION
           $archive = Join-Path $env:RUNNER_TEMP "rubyinstaller-$rubyInstallerVersion-x64.7z"
+          $url = "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-$rubyInstallerVersion/rubyinstaller-$rubyInstallerVersion-x64.7z"
+          Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
           if (!(Test-Path $archive)) {
-            Write-Error "Clean packaged smoke failed: RubyInstaller archive is missing at $archive."
+            Write-Error "Clean packaged smoke failed: RubyInstaller download failed; expected archive $archive was not created."
             exit 1
           }
 
