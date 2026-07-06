@@ -46,9 +46,18 @@ module Ruby4Lich5
     #   type the input used at any level
     def normalize(data)
       data.each_with_object({}) do |(gem_name, platforms), by_gem|
-        by_gem[gem_name.to_s] = platforms.each_with_object({}) do |(platform, entry), by_platform|
-          by_platform[platform.to_s] = entry.is_a?(Hash) ? entry.transform_keys(&:to_sym) : {}
-        end
+        by_gem[gem_name.to_s] = normalize_platforms(platforms)
+      end
+    end
+
+    # @return [Hash{String => Hash}] +{}+ if +platforms+ isn't itself a Hash
+    #   (e.g. a malformed manifest's gem-level entry is +nil+), rather than
+    #   raising
+    def normalize_platforms(platforms)
+      return {} unless platforms.is_a?(Hash)
+
+      platforms.each_with_object({}) do |(platform, entry), by_platform|
+        by_platform[platform.to_s] = entry.is_a?(Hash) ? entry.transform_keys(&:to_sym) : {}
       end
     end
   end

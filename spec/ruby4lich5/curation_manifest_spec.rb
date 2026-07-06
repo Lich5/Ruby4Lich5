@@ -55,5 +55,13 @@ RSpec.describe Ruby4Lich5::CurationManifest do
         expect(malformed.satisfied?('sqlite3', '1.7.3', 'arm64-darwin')).to be(false)
       end
     end
+
+    context 'regression: a gem-level entry that is null' do
+      it 'treats it as unsatisfied instead of raising' do
+        malformed = described_class.new('sqlite3' => nil)
+
+        expect(malformed.satisfied?('sqlite3', '1.7.3', 'x64-mingw-ucrt')).to be(false)
+      end
+    end
   end
 end
