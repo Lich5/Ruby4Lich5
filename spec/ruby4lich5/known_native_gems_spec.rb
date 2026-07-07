@@ -11,6 +11,15 @@ RSpec.describe Ruby4Lich5::KnownNativeGems do
     it 'is false for a gem not in the curated list' do
       expect(described_class.known?('some-unheard-of-gem')).to be(false)
     end
+
+    it 'is true for all 10 native members of the real GTK3 stack build, not just the original 7' do
+      # gio2/gdk3/gdk_pixbuf2 were missing until a live end-to-end BuildPlanner
+      # run surfaced the gap (2026-07-06) -- regression coverage so the list
+      # doesn't quietly drift out of sync with the real workflow again.
+      %w[glib2 gobject-introspection gio2 cairo cairo-gobject pango gdk_pixbuf2 atk gdk3 gtk3].each do |gem_name|
+        expect(described_class.known?(gem_name)).to be(true), "expected #{gem_name} to be known"
+      end
+    end
   end
 
   describe '.packages_for' do

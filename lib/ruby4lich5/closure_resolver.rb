@@ -36,9 +36,10 @@ module Ruby4Lich5
 
     # @param gem_name [String]
     # @param version [String] exact version to resolve, e.g. +"3.5.6"+
-    # @return [Array<Hash>] +{name:, version:}+ entries, topologically
-    #   sorted -- every dependency appears before anything that depends on
-    #   it, and the requested gem itself appears last
+    # @return [Array<Hash>] +{name:, version:, runtime_dependency_names:}+
+    #   entries, topologically sorted -- every dependency appears before
+    #   anything that depends on it, and the requested gem itself appears
+    #   last
     # @raise [ResolutionError] if the gem+version can't be resolved
     # @raise [IncompleteClosureError] if a resolved node's declared runtime
     #   dependency isn't itself present in the resolved set
@@ -64,7 +65,12 @@ module Ruby4Lich5
     # missing something it needs, surfacing later as a confusing failure far
     # from its actual cause instead of here, where the gap is actually known.
     #
-    # @return [Array<Hash>] +{name:, version:}+ entries in dependency order
+    # @return [Array<Hash>] +{name:, version:, runtime_dependency_names:}+
+    #   entries in dependency order -- the dependency names are carried
+    #   through (not just consumed internally) so callers building on top of
+    #   the closure, e.g. a vendoring-role classifier that needs to know
+    #   which native gem depends on which other one, don't have to re-resolve
+    #   from scratch to get edges this class already has.
     # @raise [IncompleteClosureError]
     def topological_sort(nodes)
       by_name = nodes.each_with_object({}) { |node, index| index[node.fetch(:name)] = node }
@@ -82,7 +88,8 @@ module Ruby4Lich5
         end
 
         node.fetch(:runtime_dependency_names).each { |dep_name| visit.call(dep_name, name) }
-        ordered << { name: node.fetch(:name), version: node.fetch(:version) }
+        ordered << { name: node.fetch(:name), version: node.fetch(:version),
+                     runtime_dependency_names: node.fetch(:runtime_dependency_names) }
       end
 
       nodes.each { |node| visit.call(node.fetch(:name), nil) }

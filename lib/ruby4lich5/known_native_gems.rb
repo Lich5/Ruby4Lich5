@@ -38,16 +38,26 @@ module Ruby4Lich5
       mingw-w64-ucrt-x86_64-ncurses
     ].freeze
 
-    # Gem names known to build successfully against {MSYS2_PACKAGES}.
+    # Gem names known to build successfully against {MSYS2_PACKAGES}. All 10
+    # native members of the real, currently-working GTK3 stack build
+    # (+ruby4-bundled-gems-suite.yml+'s "Install MSYS2 UCRT build surface"
+    # step installs exactly {MSYS2_PACKAGES}, unchanged, for all 10) --
+    # gio2/gdk3/gdk_pixbuf2 were missing here until a live end-to-end
+    # {BuildPlanner#plan_for} run against the real gtk3 closure surfaced the
+    # gap directly (2026-07-06): they're already proven buildable by the
+    # real pipeline, this list had simply never been synced to match.
     #
     # @return [Array<String>]
     KNOWN_GEMS = %w[
       glib2
       gobject-introspection
+      gio2
       cairo
       cairo-gobject
       pango
+      gdk_pixbuf2
       atk
+      gdk3
       gtk3
       sqlite3
       ffi
