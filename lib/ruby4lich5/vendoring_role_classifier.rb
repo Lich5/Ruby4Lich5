@@ -60,8 +60,8 @@ module Ruby4Lich5
       plan.each_with_object({}) do |entry, roles|
         next unless entry.fetch(:classification).self_contained?
 
-        depends_on_another_root_candidate = entry.fetch(:runtime_dependency_names).any? { |dep| self_contained_names[dep] }
-        roles[entry.fetch(:name)] = depends_on_another_root_candidate ? :vendoring_dependent : :vendoring_root
+        has_self_contained_dependency = entry.fetch(:runtime_dependency_names).any? { |dep| self_contained_names[dep] }
+        roles[entry.fetch(:name)] = has_self_contained_dependency ? :vendoring_dependent : :vendoring_root
       end
     end
   end
