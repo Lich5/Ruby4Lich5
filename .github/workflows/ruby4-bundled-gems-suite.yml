@@ -512,7 +512,6 @@ jobs:
           }
           New-Item -ItemType Directory -Path $harnessGems -Force | Out-Null
           Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'Rakefile') $harnessRoot -Force
-          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'scripts') (Join-Path $harnessRoot 'scripts') -Recurse -Force
           Copy-Item (Join-Path $sourceRoot '*') $harnessGems -Recurse -Force
           $sourceRoot = $harnessGems
 
