@@ -16,7 +16,7 @@ RSpec.describe Ruby4Lich5::ClosureResolver do
         resolver = described_class.new(resolve: resolve)
 
         expect(resolver.resolve_closure('ascii_charts', '0.9.1'))
-          .to eq([{ name: 'ascii_charts', version: '0.9.1' }])
+          .to eq([node('ascii_charts', '0.9.1')])
       end
     end
 
@@ -36,8 +36,8 @@ RSpec.describe Ruby4Lich5::ClosureResolver do
 
         expect(result).to eq(
           [
-            { name: 'unicode-display_width', version: '2.6.0' },
-            { name: 'terminal-table', version: '3.0.2' }
+            node('unicode-display_width', '2.6.0'),
+            node('terminal-table', '3.0.2', ['unicode-display_width'])
           ]
         )
       end

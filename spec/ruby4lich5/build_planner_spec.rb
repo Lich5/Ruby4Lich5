@@ -22,7 +22,8 @@ RSpec.describe Ruby4Lich5::BuildPlanner do
     context 'when the whole closure is already satisfied by the curation manifest' do
       it 'returns an empty plan without classifying anything' do
         allow(closure_resolver).to receive(:resolve_closure).with('sqlite3', '1.7.3')
-                                                            .and_return([{ name: 'sqlite3', version: '1.7.3' }])
+                                                            .and_return([{ name: 'sqlite3', version: '1.7.3',
+                                                                            runtime_dependency_names: [] }])
         allow(manifest).to receive(:satisfied?).with('sqlite3', '1.7.3', 'x64-mingw-ucrt').and_return(true)
         expect(classifier).not_to receive(:classify)
 
@@ -34,7 +35,10 @@ RSpec.describe Ruby4Lich5::BuildPlanner do
 
     context 'with a dependency chain where only the leaf needs building' do
       it 'omits the satisfied dependent and plans only the unsatisfied leaf' do
-        closure = [{ name: 'unicode-display_width', version: '2.6.0' }, { name: 'terminal-table', version: '3.0.2' }]
+        closure = [
+          { name: 'unicode-display_width', version: '2.6.0', runtime_dependency_names: [] },
+          { name: 'terminal-table', version: '3.0.2', runtime_dependency_names: ['unicode-display_width'] }
+        ]
         allow(closure_resolver).to receive(:resolve_closure).with('terminal-table', '3.0.2').and_return(closure)
         allow(manifest).to receive(:satisfied?).with('unicode-display_width', '2.6.0', 'x64-mingw-ucrt')
                                                .and_return(false)
@@ -46,13 +50,14 @@ RSpec.describe Ruby4Lich5::BuildPlanner do
         result = planner.plan_for('terminal-table', '3.0.2', platform: 'x64-mingw-ucrt', ruby_abi: '4.0')
 
         expect(result.map { |entry| entry[:name] }).to eq(['unicode-display_width'])
+        expect(result.first[:runtime_dependency_names]).to eq([])
         expect(classifier).not_to have_received(:classify).with(hash_including(name: 'terminal-table'))
       end
     end
 
     context 'when a gem in the closure classifies as native-needs-system-lib' do
       it 'raises UnbuildableGemError naming the gem and reason, failing the whole request' do
-        closure = [{ name: 'gtk3', version: '4.3.7' }]
+        closure = [{ name: 'gtk3', version: '4.3.7', runtime_dependency_names: [] }]
         allow(closure_resolver).to receive(:resolve_closure).with('gtk3', '4.3.7').and_return(closure)
         allow(manifest).to receive(:satisfied?).with('gtk3', '4.3.7', 'x64-mingw-ucrt').and_return(false)
         allow(classifier).to receive(:classify)
@@ -66,7 +71,10 @@ RSpec.describe Ruby4Lich5::BuildPlanner do
 
     context 'when every gem in the closure needs building' do
       it 'returns them all, in dependency order, each carrying its own classification' do
-        closure = [{ name: 'unicode-display_width', version: '2.6.0' }, { name: 'terminal-table', version: '3.0.2' }]
+        closure = [
+          { name: 'unicode-display_width', version: '2.6.0', runtime_dependency_names: [] },
+          { name: 'terminal-table', version: '3.0.2', runtime_dependency_names: ['unicode-display_width'] }
+        ]
         allow(closure_resolver).to receive(:resolve_closure).with('terminal-table', '3.0.2').and_return(closure)
         allow(manifest).to receive(:satisfied?).and_return(false)
         allow(classifier).to receive(:classify)
@@ -80,6 +88,7 @@ RSpec.describe Ruby4Lich5::BuildPlanner do
 
         expect(result.map { |entry| entry[:name] }).to eq(%w[unicode-display_width terminal-table])
         expect(result.map { |entry| entry[:classification].pure? }).to all(be(true))
+        expect(result.map { |entry| entry[:runtime_dependency_names] }).to eq([[], ['unicode-display_width']])
       end
     end
   end

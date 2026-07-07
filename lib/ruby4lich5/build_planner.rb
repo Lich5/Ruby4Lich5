@@ -12,10 +12,11 @@ module Ruby4Lich5
   #
   # Deliberately stops there. The actual "go build/patch/compile it" step
   # isn't a Ruby-callable abstraction yet -- that's still CI-workflow
-  # territory (MSYS2, the front door's publish mechanism) -- so this
+  # territory (MSYS2 itself, the front door's publish mechanism) -- so this
   # produces the plan a future build step would consume, not the build
-  # itself. Building that seam out is explicitly future work, not something
-  # faked or half-implemented here to look more complete than it is.
+  # itself. +runtime_dependency_names+ is carried through in each entry so a
+  # caller can derive build-order concerns (e.g. which native gem is a
+  # "vendoring root" others piggyback on) without re-resolving.
   class BuildPlanner
     # Raised when any gem in the closure classifies as
     # +:native_needs_system_lib+ -- no partial-success state; a closure with
@@ -36,7 +37,8 @@ module Ruby4Lich5
     # @param version [String] exact version to plan for, e.g. +"3.5.6"+
     # @param platform [String] target RubyGems platform tag
     # @param ruby_abi [String] target Ruby ABI series, e.g. +"4.0"+
-    # @return [Array<Hash>] one +{name:, version:, classification:}+ entry
+    # @return [Array<Hash>] one
+    #   +{name:, version:, classification:, runtime_dependency_names:}+ entry
     #   per gem that still needs action, in dependency order (leaves first).
     #   Entries the curation manifest already satisfies are omitted entirely
     #   -- there's nothing to plan for them.
@@ -57,7 +59,10 @@ module Ruby4Lich5
           raise UnbuildableGemError, "#{node.fetch(:name)} #{node.fetch(:version)}: #{classification.reason}"
         end
 
-        { name: node.fetch(:name), version: node.fetch(:version), classification: classification }
+        {
+          name: node.fetch(:name), version: node.fetch(:version), classification: classification,
+          runtime_dependency_names: node.fetch(:runtime_dependency_names)
+        }
       end
     end
   end
