@@ -200,6 +200,38 @@ RSpec.describe Ruby4Lich5::GemspecNormalizer do
       end
     end
 
+    context 'with an earlier, unindented end closing an unrelated top-level block' do
+      before do
+        write_gemspec(@gem_root, 'widget', <<~RUBY)
+          if RUBY_VERSION >= "2.0"
+          FOO = 1
+          end
+
+          Gem::Specification.new do |s|
+            s.version = "1.0.0"
+          end
+        RUBY
+      end
+
+      it 'inserts the file globs before the outermost end, not the earlier one' do
+        normalizer.normalize('widget', @gem_root, platform: 'x64-mingw-ucrt')
+
+        lines = gemspec_content.lines
+        globs_index = lines.index { |line| line.include?('Dir.glob("lib/**/*.so")') }
+        outer_end_index = lines.rindex { |line| line.strip == 'end' }
+        inner_end_index = lines.index { |line| line.strip == 'end' }
+
+        expect(globs_index).to be < outer_end_index
+        expect(globs_index).to be > inner_end_index
+      end
+
+      it 'still produces syntactically valid Ruby' do
+        normalizer.normalize('widget', @gem_root, platform: 'x64-mingw-ucrt')
+
+        expect { RubyVM::InstructionSequence.compile(gemspec_content) }.not_to raise_error
+      end
+    end
+
     context 'when the file globs are missing and there is no trailing end to insert before' do
       before do
         write_gemspec(@gem_root, 'widget', "Gem::Specification.new do |s|\n  s.version = \"1.0.0\"\nend # trailing comment\n")

@@ -424,10 +424,26 @@ jobs:
           # gdk_pixbuf2, atk, gdk3) -- verified directly by resolving it for real against
           # rubygems.org, not assumed. Requesting gtk3 here replaces what used to be a
           # hand-maintained, hardcoded gem list with real dependency resolution.
-          & $env:RUBY_EXE $script gtk3 $env:RUBY_GNOME_VERSION $platform $rubyAbi $sourceRoot $planPath
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Native gem preparation failed (exit $LASTEXITCODE)."
-            exit $LASTEXITCODE
+          #
+          # RubygemsClient has no built-in retry/backoff (confirmed by reading it) -- this
+          # step's resolution/download traffic all goes out over the real network, so wrap
+          # the invocation itself rather than push retry logic into the library for what's
+          # fundamentally a CI-transient-network concern, not a client-correctness one.
+          $maxAttempts = 3
+          $attempt = 0
+          do {
+            $attempt++
+            & $env:RUBY_EXE $script gtk3 $env:RUBY_GNOME_VERSION $platform $rubyAbi $sourceRoot $planPath
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -ne 0 -and $attempt -lt $maxAttempts) {
+              $backoffSeconds = 5 * $attempt
+              Write-Host "::warning::Native gem preparation failed (exit $exitCode), attempt $attempt/$maxAttempts -- retrying in ${backoffSeconds}s (rubygems.org resolution/download can hit transient network errors)."
+              Start-Sleep -Seconds $backoffSeconds
+            }
+          } while ($exitCode -ne 0 -and $attempt -lt $maxAttempts)
+          if ($exitCode -ne 0) {
+            Write-Error "Native gem preparation failed after $maxAttempts attempts (exit $exitCode)."
+            exit $exitCode
           }
           if (!(Test-Path $planPath)) {
             Write-Error "Native gem preparation did not produce a plan at $planPath."

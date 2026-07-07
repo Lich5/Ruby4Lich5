@@ -94,11 +94,17 @@ module Ruby4Lich5
     def ensure_glob(content, pattern, gemspec_path)
       glob_line = "Dir.glob(\"#{pattern}\")"
       return content if content.include?(glob_line)
-      unless content.match?(/^end\s*$/)
+
+      # rindex, not the first match -- a gemspec can contain an earlier,
+      # unindented `end` closing some other top-level block (e.g. a bare
+      # `if`/`unless`); inserting there would place s.files += ... outside
+      # the Gem::Specification.new do |s| ... end block entirely.
+      index = content.rindex(/^end\s*$/)
+      unless index
         raise NormalizationError, "#{gemspec_path}: no trailing end found to insert file globs before"
       end
 
-      content.sub(/^end\s*$/) { "  s.files += #{glob_line}\nend" }
+      "#{content[0...index]}  s.files += #{glob_line}\n#{content[index..]}"
     end
   end
 end
