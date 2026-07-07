@@ -24,6 +24,19 @@ RSpec.describe Ruby4Lich5::Classifier do
   end
 
   describe '#classify' do
+    context 'when the gem ships as a Ruby default gem (RubyBundledGems)' do
+      it 'returns a :ruby_bundled classification without ever touching rubygems_client' do
+        expect(rubygems_client).not_to receive(:download_gem)
+        expect(rubygems_client).not_to receive(:versions)
+        classifier = described_class.new(rubygems_client: rubygems_client, gem_inspector_class: Class.new)
+
+        result = classifier.classify(name: 'json', version: '2.20.0', platform: 'x64-mingw-ucrt', ruby_abi: '4.0')
+
+        expect(result.ruby_bundled?).to be(true)
+        expect(result.reason).to match(/already present/)
+      end
+    end
+
     context 'when the gem has no native extensions' do
       it 'returns a :pure classification without checking upstream platform builds' do
         ruby_path = download_path('ascii_charts', '1.0.0', 'ruby')

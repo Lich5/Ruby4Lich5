@@ -40,7 +40,7 @@ module Ruby4Lich5
     # directly -- this bit during initial implementation.
     #
     # @return [Array<Symbol>]
-    STATES = %i[pure native_pass_through native_self_contained native_needs_system_lib].freeze
+    STATES = %i[pure native_pass_through native_self_contained native_needs_system_lib ruby_bundled].freeze
 
     # Which of {#platform_asset} / {#msys2_packages} each state requires
     # present versus requires absent. Enforced by {#initialize} so
@@ -53,7 +53,8 @@ module Ruby4Lich5
       pure: { platform_asset: false, msys2_packages: false },
       native_pass_through: { platform_asset: true, msys2_packages: false },
       native_self_contained: { platform_asset: false, msys2_packages: true },
-      native_needs_system_lib: { platform_asset: false, msys2_packages: false }
+      native_needs_system_lib: { platform_asset: false, msys2_packages: false },
+      ruby_bundled: { platform_asset: false, msys2_packages: false }
     }.freeze
     private_constant :STATE_FIELD_RULES
 
@@ -87,6 +88,13 @@ module Ruby4Lich5
     # @return [Boolean] true when the gem has no native extension at all
     def pure?
       state == :pure
+    end
+
+    # @return [Boolean] true when the gem ships as a Ruby default gem,
+    #   already present and compiled in the target Ruby install -- nothing
+    #   to build or vendor at all
+    def ruby_bundled?
+      state == :ruby_bundled
     end
 
     private

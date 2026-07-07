@@ -38,7 +38,7 @@ on:
       runtime-gems:
         description: "Top-level Lich runtime gems to install from the staged local bundle."
         required: false
-        default: "gtk3 sqlite3 ox ascii_charts curses os redis sequel set terminal-table kramdown tzinfo tzinfo-data concurrent-ruby ffi webrick"
+        default: "gtk3 sqlite3 ox ascii_charts curses os redis sequel terminal-table kramdown tzinfo tzinfo-data concurrent-ruby ffi webrick"
       native-runtime-gems:
         description: "Runtime gems that must be collected as x64-mingw-ucrt binary gems."
         required: false
@@ -452,12 +452,24 @@ jobs:
 
           # The build steps below (~line 700+) still build a hardcoded GTK3 gem list --
           # item 7a (generalizing the build/vendoring steps to consume this plan
-          # directly) hasn't landed yet. Until it does, the plan and that hardcoded list
-          # must agree exactly, or the workflow could silently build a gem the planner
-          # never classified/patched (or skip one it did). Fail loudly on drift instead
-          # of trusting them to stay in sync by hand.
+          # directly) hasn't landed yet. Until it does, the *native_self_contained*
+          # subset of the plan and that hardcoded list must agree exactly, or the
+          # workflow could silently build a gem the planner never classified/patched
+          # (or skip one it did). Fail loudly on drift instead of trusting them to
+          # stay in sync by hand.
+          #
+          # Deliberately filtered to native_self_contained only, not every plan
+          # entry: BuildPlanner#plan_for resolves gtk3's *full* dependency closure,
+          # which includes real but non-actionable members too -- pure gems
+          # (rake, pkg-config, matrix, red-colors, native-package-installer) and,
+          # as of 2026-07-07, gems that ship as Ruby default gems already present
+          # in the target install (json, fiddle -- see RubyBundledGems). None of
+          # those need building here; comparing the whole plan against the
+          # 10-gem hardcoded list would fail on their presence for no real reason.
           $planGems = [System.Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-          (Get-Content $planPath -Raw | ConvertFrom-Json) | ForEach-Object { [void] $planGems.Add($_.name) }
+          (Get-Content $planPath -Raw | ConvertFrom-Json) |
+            Where-Object { $_.state -eq 'native_self_contained' } |
+            ForEach-Object { [void] $planGems.Add($_.name) }
           $hardcodedBuildGems = [System.Collections.Generic.SortedSet[string]]::new(
             [string[]] @('glib2', 'gobject-introspection', 'gio2', 'cairo', 'cairo-gobject', 'pango', 'gdk_pixbuf2', 'atk', 'gdk3', 'gtk3'),
             [StringComparer]::OrdinalIgnoreCase
@@ -465,7 +477,7 @@ jobs:
           if (-not $planGems.SetEquals($hardcodedBuildGems)) {
             $missing = @($hardcodedBuildGems | Where-Object { -not $planGems.Contains($_) })
             $extra = @($planGems | Where-Object { -not $hardcodedBuildGems.Contains($_) })
-            Write-Error "Native gems plan no longer matches this workflow's hardcoded GTK3 build list. Missing from plan (still hardcoded below but not classified/patched): $($missing -join ', '); in plan but not built below: $($extra -join ', ')."
+            Write-Error "Native gems plan's native_self_contained set no longer matches this workflow's hardcoded GTK3 build list. Missing from plan (still hardcoded below but not classified/patched): $($missing -join ', '); in plan but not built below: $($extra -join ', ')."
             exit 1
           }
 

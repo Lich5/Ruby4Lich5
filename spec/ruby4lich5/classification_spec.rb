@@ -22,6 +22,8 @@ RSpec.describe Ruby4Lich5::Classification do
       expect do
         described_class.new(state: :native_needs_system_lib, gem_name: 'mystery-gem', gem_version: '0.1.0')
       end.not_to raise_error
+      expect { described_class.new(state: :ruby_bundled, gem_name: 'json', gem_version: '2.20.0') }
+        .not_to raise_error
     end
 
     it 'rejects a state outside STATES' do
@@ -130,6 +132,16 @@ RSpec.describe Ruby4Lich5::Classification do
 
       expect(rejected.needs_system_lib?).to be(true)
       expect(other.needs_system_lib?).to be(false)
+    end
+  end
+
+  describe '#ruby_bundled?' do
+    it 'is true only for the :ruby_bundled state' do
+      bundled = described_class.new(state: :ruby_bundled, gem_name: 'json', gem_version: '2.20.0')
+      other = described_class.new(state: :pure, gem_name: 'ascii_charts', gem_version: '1.0.0')
+
+      expect(bundled.ruby_bundled?).to be(true)
+      expect(other.ruby_bundled?).to be(false)
     end
   end
 end

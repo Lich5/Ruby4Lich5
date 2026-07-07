@@ -4,6 +4,7 @@ require_relative 'classification'
 require_relative 'rubygems_client'
 require_relative 'gem_inspector'
 require_relative 'known_native_gems'
+require_relative 'ruby_bundled_gems'
 
 module Ruby4Lich5
   # Classifies a single gem, at an exact requested version, into one of
@@ -32,6 +33,7 @@ module Ruby4Lich5
     # @param ruby_abi [String] target Ruby ABI series, e.g. +"4.0"+
     # @return [Classification]
     def classify(name:, version:, platform:, ruby_abi:)
+      return ruby_bundled_classification(name, version) if RubyBundledGems.bundled?(name)
       return pure_classification(name, version) unless native?(name, version)
 
       pass_through = pass_through_classification(name, version, platform, ruby_abi)
@@ -39,6 +41,16 @@ module Ruby4Lich5
     end
 
     private
+
+    # @return [Classification]
+    def ruby_bundled_classification(name, version)
+      Classification.new(
+        state: :ruby_bundled,
+        gem_name: name,
+        gem_version: version,
+        reason: 'ships as a Ruby default gem, already present in the target Ruby install; no build or vendoring needed'
+      )
+    end
 
     # @return [Boolean] true when the source ("ruby" platform) package for
     #   this exact name+version declares native extensions
