@@ -203,6 +203,22 @@ jobs:
         env:
           PATH: ${{ steps.lanepath.outputs.path }}
         run: |
+          # gem.cmd is a batch-file wrapper, not a raw .exe -- under classic
+          # Windows PowerShell (what GH Actions' `shell: powershell` steps
+          # actually run, confirmed directly from a real failed run's log:
+          # "shell: ...WindowsPowerShell\v1.0\powershell.EXE"), any stderr
+          # line from a redirected (2>&1) .cmd invocation becomes a
+          # NativeCommandError -- a *terminating* error under whatever
+          # $ErrorActionPreference this step starts with, aborting the
+          # script immediately after gem install's first stderr line, before
+          # $LASTEXITCODE is ever read or any logs get written. Confirmed
+          # the hard way (2026-07-07): a real run died here with no
+          # BUILD_EXIT_CODE/LOG_DIR ever written, which is exactly what
+          # cascaded into the "Upload build logs" step's own failure right
+          # after. Explicit Continue makes gem install's failure (the whole
+          # point of this workflow) a normal, non-terminating result instead.
+          $ErrorActionPreference = 'Continue'
+
           $msys = $env:MSYS2_ROOT
           $rubyRoot = $env:RUBY_ROOT
           $gemExe = $env:GEM_EXE
