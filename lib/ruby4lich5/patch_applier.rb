@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'fileutils'
 require_relative 'safe_token'
 
 module Ruby4Lich5
@@ -10,8 +11,10 @@ module Ruby4Lich5
   #
   # Patch definitions live under +patches/<gem_name>/*.rb+, one file per
   # patch, applied in filename order. Each file, when +eval+'d, must produce
-  # a Hash of the shape:
+  # a Hash in one of two shapes, depending on whether it's editing an
+  # existing file or vendoring in a whole new one:
   #
+  #   # Anchor-based edit of an existing file:
   #   {
   #     file: "ext/glib2/rbgobj_object.c",  # relative to the gem's source root
   #     marker: "some distinctive string",  # presence => already patched, skip
@@ -21,6 +24,19 @@ module Ruby4Lich5
   #     ],
   #     cleanup: ->(content) { content.gsub(/\n\n\n+/, "\n\n") }  # optional
   #   }
+  #
+  #   # Whole-file creation (e.g. a rubygems_plugin.rb the real gem doesn't
+  #   # ship at all -- there's no existing content to anchor against):
+  #   {
+  #     file: "lib/rubygems_plugin.rb",
+  #     marker: "some distinctive string",  # presence => already created, skip
+  #     content: "...",
+  #   }
+  #
+  # A definition must supply exactly one of +steps+ or +content+ -- editing
+  # and whole-file creation are different operations, not two flavors of the
+  # same one, and a definition trying to do both (or neither) is almost
+  # certainly a mistake worth failing on loudly rather than guessing intent.
   #
   # Each step's +old+ must appear in the file exactly +count+ times -- not
   # "at least," not "did something change," the exact expected count -- or
@@ -32,6 +48,13 @@ module Ruby4Lich5
   # diff needs matching surrounding context, which upstream reformatting
   # breaks easily; an anchor + exact-occurrence-count assertion only cares
   # about the exact text being targeted, wherever it sits in the file.
+  #
+  # Whole-file creation is idempotent the same way: +marker+'s presence in
+  # whatever the target currently holds (if it exists at all) means skip,
+  # not re-check content equality -- consistent with how anchor-based patches
+  # decide "already applied" for the same reason (a byte-for-byte diff would
+  # make an intentional later revision to the vendored content look like
+  # drift needing investigation, when it's just this file being updated).
   #
   # Patches we don't own (they're gem source, not our own code) don't get
   # their own spec-suite coverage inside +patches/+ itself -- {PatchApplier}
@@ -57,9 +80,10 @@ module Ruby4Lich5
     #   +status+ is +:applied+ or +:already_applied+
     # @raise [ArgumentError] if +gem_name+ is missing or contains unsafe
     #   characters
-    # @raise [PatchError] if a patch's target file is missing or would
-    #   resolve outside +source_dir+, or any step's anchor doesn't appear the
-    #   exact expected number of times
+    # @raise [PatchError] if a definition supplies both or neither of
+    #   +steps+/+content+; if an edit's target file is missing or would
+    #   resolve outside +source_dir+; or if any step's anchor doesn't appear
+    #   the exact expected number of times
     def apply_all(gem_name, source_dir)
       SafeToken.validate!(gem_name, 'gem name')
 
@@ -79,9 +103,41 @@ module Ruby4Lich5
     end
 
     # @return [Symbol] +:applied+ or +:already_applied+
+    # @raise [PatchError] if the definition supplies both or neither of
+    #   +steps+/+content+
     def apply_patch(patch_file, source_dir)
       definition = load_definition(patch_file)
       target = resolve_target(source_dir, definition.fetch(:file), patch_file)
+      has_steps = definition.key?(:steps)
+      has_content = definition.key?(:content)
+      unless has_steps ^ has_content
+        raise PatchError, "#{patch_file}: definition must supply exactly one of steps: or content:"
+      end
+
+      has_content ? apply_whole_file(definition, target) : apply_edit(definition, target, patch_file)
+    end
+
+    # Creates or overwrites +target+ wholesale with +definition[:content]+ --
+    # for vendoring in a file the real gem doesn't ship at all, so there's no
+    # existing content to anchor edits against.
+    #
+    # @return [Symbol] +:applied+ or +:already_applied+
+    def apply_whole_file(definition, target)
+      if File.exist?(target) && File.read(target).include?(definition.fetch(:marker))
+        return :already_applied
+      end
+
+      FileUtils.mkdir_p(File.dirname(target))
+      File.write(target, definition.fetch(:content))
+      :applied
+    end
+
+    # Anchor-based edit of an existing file's content.
+    #
+    # @return [Symbol] +:applied+ or +:already_applied+
+    # @raise [PatchError] if +target+ doesn't already exist, or any step's
+    #   anchor doesn't appear the exact expected number of times
+    def apply_edit(definition, target, patch_file)
       raise PatchError, "#{patch_file}: target file not found at #{target}" unless File.exist?(target)
 
       content = File.read(target)

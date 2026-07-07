@@ -96,6 +96,77 @@ RSpec.describe Ruby4Lich5::PatchApplier do
       end
     end
 
+    context 'with a whole-file-creation patch (content: instead of steps:)' do
+      before do
+        write_patch(@patches_root, 'widget', '01-vendor-plugin', <<~RUBY)
+          {
+            file: 'lib/rubygems_plugin.rb',
+            marker: 'VENDORED_PLUGIN_MARKER',
+            content: "# VENDORED_PLUGIN_MARKER\\nputs 'hello'\\n"
+          }
+        RUBY
+      end
+
+      it 'creates the file when it does not exist yet' do
+        result = applier.apply_all('widget', @source_dir)
+
+        expect(result).to eq([{ patch: '01-vendor-plugin', status: :applied }])
+        expect(File.read(File.join(@source_dir, 'lib/rubygems_plugin.rb'))).to include('VENDORED_PLUGIN_MARKER')
+      end
+
+      it 'creates any missing intermediate directories' do
+        applier.apply_all('widget', @source_dir)
+
+        expect(File.directory?(File.join(@source_dir, 'lib'))).to be(true)
+      end
+
+      it 'is idempotent -- a second run reports :already_applied and does not overwrite' do
+        applier.apply_all('widget', @source_dir)
+        target = File.join(@source_dir, 'lib/rubygems_plugin.rb')
+        File.write(target, "#{File.read(target)}# hand-edited, should survive\n")
+
+        result = applier.apply_all('widget', @source_dir)
+
+        expect(result).to eq([{ patch: '01-vendor-plugin', status: :already_applied }])
+        expect(File.read(target)).to include('hand-edited, should survive')
+      end
+
+      it 'overwrites stale content that lacks the marker' do
+        write_source(@source_dir, 'lib/rubygems_plugin.rb', "# an old, pre-marker version\n")
+
+        result = applier.apply_all('widget', @source_dir)
+
+        expect(result).to eq([{ patch: '01-vendor-plugin', status: :applied }])
+        expect(File.read(File.join(@source_dir, 'lib/rubygems_plugin.rb'))).to include('VENDORED_PLUGIN_MARKER')
+      end
+    end
+
+    context 'when a definition supplies both steps: and content:' do
+      before do
+        write_patch(@patches_root, 'widget', '01-ambiguous', <<~RUBY)
+          { file: 'lib/widget.c', marker: 'MARK', steps: [], content: 'x' }
+        RUBY
+      end
+
+      it 'raises PatchError rather than guessing which mode was intended' do
+        expect { applier.apply_all('widget', @source_dir) }
+          .to raise_error(described_class::PatchError, /exactly one of steps: or content:/)
+      end
+    end
+
+    context 'when a definition supplies neither steps: nor content:' do
+      before do
+        write_patch(@patches_root, 'widget', '01-empty', <<~RUBY)
+          { file: 'lib/widget.c', marker: 'MARK' }
+        RUBY
+      end
+
+      it 'raises PatchError rather than guessing which mode was intended' do
+        expect { applier.apply_all('widget', @source_dir) }
+          .to raise_error(described_class::PatchError, /exactly one of steps: or content:/)
+      end
+    end
+
     context 'when an anchor occurs the wrong number of times' do
       before do
         write_patch(@patches_root, 'widget', '01-fix', <<~RUBY)
@@ -192,8 +263,8 @@ RSpec.describe Ruby4Lich5::PatchApplier do
   describe 'the real curated patches' do
     subject(:applier) { described_class.new } # default patches_root -- the real committed patches/
 
-    context 'glib2 property-retention-fix' do
-      let(:before_source) do
+    context 'glib2 (dll-path-and-require-abi + property-retention-fix, both apply together)' do
+      let(:before_c_source) do
         <<~C
           static VALUE
           rg_s_set_property(GObject *object, guint property_id, const GValue *value, GParamSpec *pspec)
@@ -202,28 +273,107 @@ RSpec.describe Ruby4Lich5::PatchApplier do
           }
         C
       end
+      let(:before_rb_source) do
+        <<~RUBY
+          def prepend_dll_path(path)
+            path = Pathname(path) unless path.is_a?(Pathname)
+            return unless path.exist?
 
-      it 'applies against realistic source and roots the value via G_CHILD_SET' do
+            begin
+              require "ruby_installer/runtime"
+            rescue LoadError
+            else
+              RubyInstaller::Runtime.add_dll_directory(path.to_s)
+            end
+            prepend_path_to_environment_variable(path, "PATH")
+          end
+
+          require "glib2.so"
+
+          module GLib
+        RUBY
+      end
+
+      def write_glib2_source(source_dir, before_c_source, before_rb_source)
+        write_source(source_dir, 'ext/glib2/rbgobj_object.c', before_c_source)
+        write_source(source_dir, 'lib/glib2.rb', before_rb_source)
+      end
+
+      it 'applies both patches against realistic source' do
         Dir.mktmpdir do |source_dir|
-          write_source(source_dir, 'ext/glib2/rbgobj_object.c', before_source)
+          write_glib2_source(source_dir, before_c_source, before_rb_source)
 
           result = applier.apply_all('glib2', source_dir)
 
-          expect(result).to eq([{ patch: 'property-retention-fix', status: :applied }])
-          patched = File.read(File.join(source_dir, 'ext/glib2/rbgobj_object.c'))
-          expect(patched).to include('G_CHILD_SET(rb_object')
-          expect(patched).not_to include('rb_funcall(GOBJ2RVAL(object), ruby_setter, 1, GVAL2RVAL(value));')
+          expect(result).to contain_exactly(
+            { patch: 'dll-path-and-require-abi', status: :applied },
+            { patch: 'property-retention-fix', status: :applied }
+          )
+          patched_c = File.read(File.join(source_dir, 'ext/glib2/rbgobj_object.c'))
+          expect(patched_c).to include('G_CHILD_SET(rb_object')
+          expect(patched_c).not_to include('rb_funcall(GOBJ2RVAL(object), ruby_setter, 1, GVAL2RVAL(value));')
+          patched_rb = File.read(File.join(source_dir, 'lib/glib2.rb'))
+          expect(patched_rb).to include('GLib.prepend_dll_path(vendor_dir + "bin")')
+          # rubocop:disable Lint/InterpolationCheck -- asserting the literal
+          # text landed uninterpolated; see the patch definition's own comment.
+          expect(patched_rb).to include('require "glib2/#{major}.#{minor}/glib2.so"')
+          # rubocop:enable Lint/InterpolationCheck
+          expect(patched_rb).not_to include('require "glib2.so"')
         end
       end
 
       it 'is idempotent against already-patched source' do
         Dir.mktmpdir do |source_dir|
-          write_source(source_dir, 'ext/glib2/rbgobj_object.c', before_source)
+          write_glib2_source(source_dir, before_c_source, before_rb_source)
           applier.apply_all('glib2', source_dir)
 
           result = applier.apply_all('glib2', source_dir)
 
-          expect(result).to eq([{ patch: 'property-retention-fix', status: :already_applied }])
+          expect(result).to contain_exactly(
+            { patch: 'dll-path-and-require-abi', status: :already_applied },
+            { patch: 'property-retention-fix', status: :already_applied }
+          )
+        end
+      end
+    end
+
+    context 'cairo dll-path-and-require-abi' do
+      let(:before_source) do
+        <<~RUBY
+          require "cairo/color"
+          require "cairo/paper"
+          require "cairo.so"
+          require "cairo/constants"
+
+          module Cairo
+        RUBY
+      end
+
+      it 'applies against realistic source' do
+        Dir.mktmpdir do |source_dir|
+          write_source(source_dir, 'lib/cairo.rb', before_source)
+
+          result = applier.apply_all('cairo', source_dir)
+
+          expect(result).to eq([{ patch: 'dll-path-and-require-abi', status: :applied }])
+          patched = File.read(File.join(source_dir, 'lib/cairo.rb'))
+          expect(patched).to include('RubyInstaller::Runtime.add_dll_directory(vendor_bin.to_s)')
+          # rubocop:disable Lint/InterpolationCheck -- asserting the literal
+          # text landed uninterpolated; see the patch definition's own comment.
+          expect(patched).to include('require "cairo/#{major}.#{minor}/cairo.so"')
+          # rubocop:enable Lint/InterpolationCheck
+          expect(patched).not_to include('require "cairo.so"')
+        end
+      end
+
+      it 'is idempotent against already-patched source' do
+        Dir.mktmpdir do |source_dir|
+          write_source(source_dir, 'lib/cairo.rb', before_source)
+          applier.apply_all('cairo', source_dir)
+
+          result = applier.apply_all('cairo', source_dir)
+
+          expect(result).to eq([{ patch: 'dll-path-and-require-abi', status: :already_applied }])
         end
       end
     end
@@ -297,13 +447,33 @@ RSpec.describe Ruby4Lich5::PatchApplier do
         C
       end
 
-      it 'applies all eight steps against realistic source' do
+      let(:before_rb_source) do
+        <<~RUBY
+          require "glib2"
+
+          module GObjectIntrospection
+          end
+
+          require "gobject_introspection.so"
+        RUBY
+      end
+
+      def write_gi_source(source_dir, before_source, before_rb_source)
+        write_source(source_dir, 'ext/gobject-introspection/rb-gi-loader.c', before_source)
+        write_source(source_dir, 'lib/gobject-introspection.rb', before_rb_source)
+      end
+
+      it 'applies all three patches against realistic source' do
         Dir.mktmpdir do |source_dir|
-          write_source(source_dir, 'ext/gobject-introspection/rb-gi-loader.c', before_source)
+          write_gi_source(source_dir, before_source, before_rb_source)
 
           result = applier.apply_all('gobject-introspection', source_dir)
 
-          expect(result).to eq([{ patch: 'gc-compact-safety-fix', status: :applied }])
+          expect(result).to contain_exactly(
+            { patch: 'dll-path-and-require-abi', status: :applied },
+            { patch: 'gc-compact-safety-fix', status: :applied },
+            { patch: 'vendor-rubygems-plugin', status: :applied }
+          )
           patched = File.read(File.join(source_dir, 'ext/gobject-introspection/rb-gi-loader.c'))
           expect(patched).not_to include('boxed_class_converters_name')
           expect(patched).not_to include('object_class_converters_name')
@@ -311,17 +481,121 @@ RSpec.describe Ruby4Lich5::PatchApplier do
           expect(patched).not_to include('rb_ary_delete(data->rb_converters')
           expect(patched.scan('rb_gc_register_address(&data->rb_converter)').size).to eq(2)
           expect(patched.scan('rb_gc_unregister_address(&data->rb_converter)').size).to eq(2)
+          patched_rb = File.read(File.join(source_dir, 'lib/gobject-introspection.rb'))
+          expect(patched_rb).to include('GLib.prepend_dll_path(vendor_dir + "bin")')
+          expect(patched_rb).not_to include('require "gobject_introspection.so"')
+          plugin = File.read(File.join(source_dir, 'lib/rubygems_plugin.rb'))
+          expect(plugin).to include('GDK_PIXBUF_MODULE_FILE')
         end
       end
 
       it 'is idempotent against already-patched source' do
         Dir.mktmpdir do |source_dir|
-          write_source(source_dir, 'ext/gobject-introspection/rb-gi-loader.c', before_source)
+          write_gi_source(source_dir, before_source, before_rb_source)
           applier.apply_all('gobject-introspection', source_dir)
 
           result = applier.apply_all('gobject-introspection', source_dir)
 
-          expect(result).to eq([{ patch: 'gc-compact-safety-fix', status: :already_applied }])
+          expect(result).to contain_exactly(
+            { patch: 'dll-path-and-require-abi', status: :already_applied },
+            { patch: 'gc-compact-safety-fix', status: :already_applied },
+            { patch: 'vendor-rubygems-plugin', status: :already_applied }
+          )
+        end
+      end
+    end
+
+    shared_examples 'a loader dll-path-and-require-abi patch' do |gem_name|
+      let(:before_source) do
+        <<~RUBY
+          module #{gem_name.split('-').map(&:capitalize).join}
+            class Loader < GObjectIntrospection::Loader
+              def load
+                require_extension
+                require_libraries
+              end
+
+              def require_extension
+                require "#{gem_name}.so"
+              end
+            end
+          end
+        RUBY
+      end
+
+      it 'applies against realistic source' do
+        Dir.mktmpdir do |source_dir|
+          write_source(source_dir, "lib/#{gem_name}/loader.rb", before_source)
+
+          result = applier.apply_all(gem_name, source_dir)
+
+          expect(result).to eq([{ patch: 'dll-path-and-require-abi', status: :applied }])
+          patched = File.read(File.join(source_dir, "lib/#{gem_name}/loader.rb"))
+          expect(patched).to include('GLib.prepend_dll_path(vendor_dir + "bin")')
+          expect(patched).to include(%(require "#{gem_name}/\#{major}.\#{minor}/#{gem_name}.so"))
+          expect(patched).not_to include(%(require "#{gem_name}.so"))
+        end
+      end
+
+      it 'is idempotent against already-patched source' do
+        Dir.mktmpdir do |source_dir|
+          write_source(source_dir, "lib/#{gem_name}/loader.rb", before_source)
+          applier.apply_all(gem_name, source_dir)
+
+          result = applier.apply_all(gem_name, source_dir)
+
+          expect(result).to eq([{ patch: 'dll-path-and-require-abi', status: :already_applied }])
+        end
+      end
+    end
+
+    context 'gio2 dll-path-and-require-abi' do
+      include_examples 'a loader dll-path-and-require-abi patch', 'gio2'
+    end
+
+    context 'pango dll-path-and-require-abi' do
+      include_examples 'a loader dll-path-and-require-abi patch', 'pango'
+    end
+
+    context 'gtk3 dll-path-and-require-abi' do
+      include_examples 'a loader dll-path-and-require-abi patch', 'gtk3'
+    end
+
+    context 'cairo-gobject require-abi' do
+      let(:before_source) do
+        <<~RUBY
+          require "cairo"
+          require "glib2"
+
+          require "cairo_gobject.so"
+        RUBY
+      end
+
+      it 'applies against realistic source' do
+        Dir.mktmpdir do |source_dir|
+          write_source(source_dir, 'lib/cairo-gobject.rb', before_source)
+
+          result = applier.apply_all('cairo-gobject', source_dir)
+
+          expect(result).to eq([{ patch: 'require-abi', status: :applied }])
+          patched = File.read(File.join(source_dir, 'lib/cairo-gobject.rb'))
+          expect(patched).to include('major, minor, _ = RUBY_VERSION.split(/\./)')
+          # rubocop:disable Lint/InterpolationCheck -- asserting the literal
+          # text landed uninterpolated; see the patch definition's own comment.
+          expect(patched).to include('require "cairo-gobject/#{major}.#{minor}/cairo_gobject.so"')
+          # rubocop:enable Lint/InterpolationCheck
+          expect(patched).not_to include('require "cairo_gobject.so"')
+        end
+      end
+
+      it 'is idempotent against already-patched source' do
+        Dir.mktmpdir do |source_dir|
+          write_source(source_dir, 'lib/cairo-gobject.rb', before_source)
+          applier.apply_all('cairo-gobject', source_dir)
+
+          result = applier.apply_all('cairo-gobject', source_dir)
+
+          expect(result).to eq([{ patch: 'require-abi', status: :already_applied }])
         end
       end
     end

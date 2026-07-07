@@ -1,13 +1,23 @@
 # Inherited from Lich5/lich5-gtk3-gems (2026-06-14) as the seed for the Ruby4Lich5
 # "front door" (Phase 2 of ROADMAP-woven-plan.md): a fixed monolithic build of one named
-# suite (GTK3), to be generalized into "name any gem -> classify -> build -> publish".
-# Not yet refactored. Known stale spot: the glib2-gc-repair input below still assumes the
-# old cache-ruby-property-setter-values patch approach, which the 2026-07-03 GC.compact
-# fix in lich5-gtk3-gems (rb-gi-loader.c) replaces with rb_gc_register_mark_object.
-# Also stale: the upload-artifact step below is still @v4 (Node 20; lich5-gtk3-gems never
-# got the fix that elanthia-online/lich-5's own CI already has). Not urgent by itself
-# (Node 20 is removed from runners 2026-09-16, not before), but fix it when this file gets
-# rewritten for Phase 2 rather than patching it standalone now.
+# suite (GTK3), being generalized into "name any gem -> classify -> build -> publish".
+#
+# The classify/patch/normalize decisions are now Ruby, not ad-hoc PowerShell -- see
+# "Prepare native gems" below, calling bin/prepare_native_gems.rb
+# (Ruby4Lich5::NativeGemPreparer, backed by Classifier/ClosureResolver/BuildPlanner/
+# GemspecNormalizer/PatchApplier, all tested). The glib2-gc-repair input this used to
+# have is gone -- PatchApplier's curated patches (glib2/property-retention-fix.rb,
+# gobject-introspection/gc-compact-safety-fix.rb) apply unconditionally now, no flag
+# needed, matching every other native gem's patches falling out cleanly when none exist.
+#
+# Still NOT generalized: MSYS2 package installation and the actual native compile below
+# still target the fixed GTK3 stack directly, not the JSON plan's own msys2_packages per
+# gem -- full "any named gem" generalization of the compile step itself is separate,
+# larger, future work, not done in this pass.
+#
+# upload-artifact/download-artifact bumped to v5 as part of this rewrite (matching the
+# checkout@v5 already used below) -- was v4 (Node 20; lich5-gtk3-gems never got the fix
+# elanthia-online/lich-5's own CI already had).
 name: Build Ruby4 Bundled Gems Suite
 
 on:
@@ -25,14 +35,6 @@ on:
         description: "rcairo version to build from upstream gem source."
         required: false
         default: "1.18.5"
-      glib2-gc-repair:
-        description: "Optional glib2 patch for Ruby-defined GObject property retention."
-        required: false
-        default: "cache-ruby-property-setter-values"
-        type: choice
-        options:
-          - "cache-ruby-property-setter-values"
-          - "none"
       runtime-gems:
         description: "Top-level Lich runtime gems to install from the staged local bundle."
         required: false
@@ -72,7 +74,6 @@ jobs:
           $rubyInstallerVersion = '${{ inputs.ruby-installer-version }}'
           $rubyGnomeVersion = '${{ inputs.ruby-gnome-version }}'
           $cairoVersion = '${{ inputs.cairo-version }}'
-          $glib2GcRepair = '${{ inputs.glib2-gc-repair }}'
           $runtimeGems = '${{ inputs.runtime-gems }}'
           $nativeRuntimeGems = '${{ inputs.native-runtime-gems }}'
           $diagnosticMkmfLogs = '${{ inputs.diagnostic-mkmf-logs }}'
@@ -87,10 +88,6 @@ jobs:
           }
           if ($cairoVersion -notmatch '^\d+\.\d+\.\d+$') {
             Write-Error "cairo-version must look like N.N.N; received '$cairoVersion'."
-            exit 1
-          }
-          if ($glib2GcRepair -notin @('cache-ruby-property-setter-values', 'none')) {
-            Write-Error "glib2-gc-repair must be 'cache-ruby-property-setter-values' or 'none'; received '$glib2GcRepair'."
             exit 1
           }
           if ([string]::IsNullOrWhiteSpace($runtimeGems)) {
@@ -109,7 +106,6 @@ jobs:
           "RUBY_INSTALLER_VERSION=$rubyInstallerVersion" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "RUBY_GNOME_VERSION=$rubyGnomeVersion" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "CAIRO_VERSION=$cairoVersion" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "GLIB2_GC_REPAIR=$glib2GcRepair" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "RUNTIME_GEMS=$runtimeGems" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "NATIVE_RUNTIME_GEMS=$nativeRuntimeGems" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "DIAGNOSTIC_MKMF_LOGS=$diagnosticMkmfLogs" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
@@ -413,207 +409,61 @@ jobs:
             Write-Host "Source normalization: generated $gemspec from $gemPackage"
           }
 
-      - name: Patch upstream sources for Ruby4 binary gems
+      - name: Prepare native gems (classify, normalize, patch -- Ruby, not ad-hoc PowerShell)
         shell: powershell
-        env:
-          PATH: ${{ steps.lanepath.outputs.path }}
         run: |
           $sourceRoot = $env:SOURCE_ROOT
           $platform = $env:GEM_PLATFORM
-          $rubyGnomeVersion = $env:RUBY_GNOME_VERSION
-          $cairoVersion = $env:CAIRO_VERSION
+          # ruby-installer-version looks like 4.0.5-1; ruby_abi is just the series (4.0).
+          $rubyAbi = ($env:RUBY_INSTALLER_VERSION -replace '^(\d+\.\d+)\..*$', '$1')
+          $planPath = Join-Path $env:RUNNER_TEMP 'native-gems-plan.json'
+          $script = Join-Path $env:GITHUB_WORKSPACE 'bin\prepare_native_gems.rb'
 
-          function Read-Text([string] $path) {
-            Get-Content $path -Raw
+          # gtk3's own dependency closure already includes every native gem this suite
+          # builds (glib2, gobject-introspection, gio2, cairo, cairo-gobject, pango,
+          # gdk_pixbuf2, atk, gdk3) -- verified directly by resolving it for real against
+          # rubygems.org, not assumed. Requesting gtk3 here replaces what used to be a
+          # hand-maintained, hardcoded gem list with real dependency resolution.
+          & $env:RUBY_EXE $script gtk3 $env:RUBY_GNOME_VERSION $platform $rubyAbi $sourceRoot $planPath
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Native gem preparation failed (exit $LASTEXITCODE)."
+            exit $LASTEXITCODE
+          }
+          if (!(Test-Path $planPath)) {
+            Write-Error "Native gem preparation did not produce a plan at $planPath."
+            exit 1
           }
 
-          function Write-Text([string] $path, [string] $content) {
-            Set-Content -Path $path -Value $content -Encoding ascii
+          # The build steps below (~line 700+) still build a hardcoded GTK3 gem list --
+          # item 7a (generalizing the build/vendoring steps to consume this plan
+          # directly) hasn't landed yet. Until it does, the plan and that hardcoded list
+          # must agree exactly, or the workflow could silently build a gem the planner
+          # never classified/patched (or skip one it did). Fail loudly on drift instead
+          # of trusting them to stay in sync by hand.
+          $planGems = [System.Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+          (Get-Content $planPath -Raw | ConvertFrom-Json) | ForEach-Object { [void] $planGems.Add($_.name) }
+          $hardcodedBuildGems = [System.Collections.Generic.SortedSet[string]]::new(
+            [string[]] @('glib2', 'gobject-introspection', 'gio2', 'cairo', 'cairo-gobject', 'pango', 'gdk_pixbuf2', 'atk', 'gdk3', 'gtk3'),
+            [StringComparer]::OrdinalIgnoreCase
+          )
+          if (-not $planGems.SetEquals($hardcodedBuildGems)) {
+            $missing = @($hardcodedBuildGems | Where-Object { -not $planGems.Contains($_) })
+            $extra = @($planGems | Where-Object { -not $hardcodedBuildGems.Contains($_) })
+            Write-Error "Native gems plan no longer matches this workflow's hardcoded GTK3 build list. Missing from plan (still hardcoded below but not classified/patched): $($missing -join ', '); in plan but not built below: $($extra -join ', ')."
+            exit 1
           }
 
-          function Patch-Gemspec([string] $gemName) {
-            $gemspec = Join-Path $sourceRoot "$gemName\$gemName.gemspec"
-            if (!(Test-Path $gemspec)) {
-              Write-Error "Patch failed: gemspec not found for $gemName at $gemspec."
-              exit 1
-            }
-            $content = Read-Text $gemspec
-            $content = $content -replace '(?m)^\s*s\.extensions\s*=.*\r?\n', ''
-            # Strip build-only deps regardless of gemspec format. Source-ZIP gems
-            # write s.add_runtime_dependency("pkg-config", ...), but gem-unpacked
-            # ones (cairo) write the serialized %q<pkg-config> form, so match both.
-            $content = $content -replace '(?m)^.*add_runtime_dependency.*pkg-config.*\r?\n', ''
-            $content = $content -replace '(?m)^.*add_runtime_dependency.*native-package-installer.*\r?\n', ''
-            if ($content -notmatch 's\.platform\s*=') {
-              $content = $content -replace '(s\.version\s*=.*\r?\n)', "`$1  s.platform      = Gem::Platform.new('$platform')`n"
-            }
-            if ($content -notmatch 'Dir\.glob\("lib/\*\*/\*\.so"\)') {
-              $content = $content -replace '(?m)^end\s*$', "  s.files += Dir.glob(`"lib/**/*.so`")`n  s.files += Dir.glob(`"vendor/**/*`")`nend"
-            }
-            Write-Text $gemspec $content
-          }
+          "NATIVE_GEMS_PLAN=$planPath" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "::group::Native gems build plan"
+          Get-Content $planPath | Write-Host
+          Write-Host "::endgroup::"
 
-          # Future work: Insert-Before/Replace-Required below are inline
-          # string-substitution patches. A real-diff-based PatchApplier
-          # mechanism (planned, separate feat/ branch) will be the home for
-          # patches that are genuine source code changes -- e.g. glib2's
-          # GC-safety fix, GObject-Introspection's fix -- since regex-replace
-          # doesn't handle multi-line C changes well. These existing simple
-          # require-path patches are small and working; migrating them isn't
-          # free, so they're left as-is here deliberately, not an oversight.
-          function Insert-Before([string] $path, [string] $needle, [string] $insert) {
-            $content = Read-Text $path
-            if ($content.Contains($insert.Trim())) {
-              return
-            }
-            if (-not $content.Contains($needle)) {
-              Write-Error "Patch failed: expected anchor not found in $path`: $needle"
-              exit 1
-            }
-            Write-Text $path $content.Replace($needle, "$insert`n$needle")
-          }
-
-          function Replace-Required([string] $path, [string] $pattern, [string] $replacement, [string] $description) {
-            $content = Read-Text $path
-            $updated = $content -replace $pattern, $replacement
-            if ($updated -eq $content) {
-              Write-Error "Patch failed: expected $description was not found in $path."
-              exit 1
-            }
-            Write-Text $path $updated
-          }
-
-          foreach ($gemName in @('glib2', 'gobject-introspection', 'gio2', 'cairo', 'cairo-gobject', 'pango', 'gdk_pixbuf2', 'atk', 'gdk3', 'gtk3')) {
-            Patch-Gemspec $gemName
-          }
-
-          $glib2 = Join-Path $sourceRoot 'glib2\lib\glib2.rb'
-          $glib2Insert = @(
-            'base_dir = Pathname.new(__FILE__).dirname.dirname.expand_path',
-            'vendor_dir = base_dir + "vendor" + "local"',
-            'GLib.prepend_dll_path(vendor_dir + "bin")',
-            'major, minor, _ = RUBY_VERSION.split(/\./)'
-          ) -join "`n"
-          Insert-Before $glib2 'require "glib2.so"' $glib2Insert
-          $glib2Content = Read-Text $glib2
-          $glib2Content = $glib2Content -replace 'require\s+"glib2\.so"', 'require "glib2/#{major}.#{minor}/glib2.so"'
-          Write-Text $glib2 $glib2Content
-
-          $cairo = Join-Path $sourceRoot 'cairo\lib\cairo.rb'
-          $cairoInsert = @(
-            'if RUBY_PLATFORM =~ /mingw|mswin/',
-            '  require "pathname"',
-            '  base_dir = Pathname.new(__FILE__).dirname.dirname.expand_path',
-            '  vendor_bin = base_dir + "vendor" + "local" + "bin"',
-            '  if vendor_bin.exist?',
-            '    begin',
-            '      require "ruby_installer/runtime"',
-            '      RubyInstaller::Runtime.add_dll_directory(vendor_bin.to_s)',
-            '    rescue LoadError',
-            '      ENV["PATH"] = "#{vendor_bin};#{ENV["PATH"]}"',
-            '    end',
-            '  end',
-            'end',
-            'major, minor, _ = RUBY_VERSION.split(/\./)'
-          ) -join "`n"
-          Insert-Before $cairo 'require "cairo.so"' $cairoInsert
-          $cairoContent = Read-Text $cairo
-          $cairoContent = $cairoContent -replace 'require\s+"cairo\.so"', 'require "cairo/#{major}.#{minor}/cairo.so"'
-          Write-Text $cairo $cairoContent
-
-          $gi = Join-Path $sourceRoot 'gobject-introspection\lib\gobject-introspection.rb'
-          $giInsert = @(
-            'base_dir = Pathname.new(__FILE__).dirname.dirname.expand_path',
-            'vendor_dir = base_dir + "vendor" + "local"',
-            'GLib.prepend_dll_path(vendor_dir + "bin")',
-            '',
-            'fontconfig_path = vendor_dir + "etc" + "fonts"',
-            'fonts_conf = fontconfig_path + "fonts.conf"',
-            'if fontconfig_path.exist? && fonts_conf.exist?',
-            '  ENV["FONTCONFIG_PATH"] = fontconfig_path.to_s',
-            '  ENV["FONTCONFIG_FILE"] = fonts_conf.to_s',
-            'end',
-            '',
-            'major, minor, _ = RUBY_VERSION.split(/\./)'
-          ) -join "`n"
-          Insert-Before $gi 'require "gobject_introspection.so"' $giInsert
-          Replace-Required $gi 'require\s+"gobject_introspection\.so"' 'require "gobject-introspection/#{major}.#{minor}/gobject_introspection.so"' 'gobject-introspection native extension require'
-          $giContent = Read-Text $gi
-          $giContent = $giContent -replace 'GObjectIntrospection\.prepend_typelib_path\(([^)]*)\)', 'GObjectIntrospection.prepend_typelib_path(vendor_dir + "lib" + "girepository-1.0")'
-          Write-Text $gi $giContent
-
-          $giPlugin = @(
-            'if Gem.win_platform?',
-            '  gi_spec = Gem::Specification.find_by_name("gobject-introspection") rescue nil',
-            '  if gi_spec',
-            '    vendor_dir = File.join(gi_spec.gem_dir, "vendor", "local")',
-            '    fontconfig_file = File.join(vendor_dir, "etc", "fonts", "fonts.conf")',
-            '    if File.exist?(fontconfig_file)',
-            '      ENV["FONTCONFIG_FILE"] = fontconfig_file',
-            '      ENV["FONTCONFIG_PATH"] = File.dirname(fontconfig_file)',
-            '    end',
-            '',
-            '    pixbuf_dir = File.join(vendor_dir, "lib", "gdk-pixbuf-2.0", "2.10.0")',
-            '    loaders_dir = File.join(pixbuf_dir, "loaders")',
-            '    cache_template = File.join(pixbuf_dir, "loaders.cache.in")',
-            '    cache_file = File.join(pixbuf_dir, "loaders.cache")',
-            '    if File.exist?(cache_template) && File.directory?(loaders_dir)',
-            '      template = File.read(cache_template)',
-            '      File.write(cache_file, template.gsub("@@MODULEDIR@@", loaders_dir.gsub("/", "\\")))',
-            '      ENV["GDK_PIXBUF_MODULE_FILE"] = cache_file if File.exist?(cache_file)',
-            '    end',
-            '  end',
-            'end'
-          ) -join "`n"
-          Write-Text (Join-Path $sourceRoot 'gobject-introspection\lib\rubygems_plugin.rb') $giPlugin
-
-          foreach ($loaderPath in @(
-            (Join-Path $sourceRoot 'gio2\lib\gio2\loader.rb'),
-            (Join-Path $sourceRoot 'pango\lib\pango\loader.rb'),
-            (Join-Path $sourceRoot 'gtk3\lib\gtk3\loader.rb')
-          )) {
-            if (!(Test-Path $loaderPath)) {
-              continue
-            }
-            $loader = Read-Text $loaderPath
-            # loader.rb lives at <gem>/lib/<gem>/loader.rb, so the gem name is
-            # the leaf of its immediate parent dir (one -Parent, not two -- two
-            # yields "lib", so the require "<gem>.so" rewrite never matches).
-            $gemName = Split-Path (Split-Path $loaderPath -Parent) -Leaf
-            $moduleName = $gemName
-            $prepend = @(
-              '      base_dir = Pathname.new(__FILE__).dirname.dirname.dirname.expand_path',
-              '      vendor_dir = base_dir + "vendor" + "local"',
-              '      GLib.prepend_dll_path(vendor_dir + "bin")',
-              '      major, minor, _ = RUBY_VERSION.split(/\./)'
-            ) -join "`n"
-            $loader = $loader -replace "require\s+`"$gemName\.so`"", "$prepend`n      require `"$gemName/#{major}.#{minor}/$moduleName.so`""
-            Write-Text $loaderPath $loader
-          }
-
-          $cairoGObject = Join-Path $sourceRoot 'cairo-gobject\lib\cairo-gobject.rb'
-          Replace-Required $cairoGObject 'require\s+"cairo_gobject\.so"' ('major, minor, _ = RUBY_VERSION.split(/\./)' + "`n" + 'require "cairo-gobject/#{major}.#{minor}/cairo_gobject.so"') 'cairo-gobject native extension require'
-
-          if ($env:GLIB2_GC_REPAIR -eq 'cache-ruby-property-setter-values') {
-            $objectSource = Join-Path $sourceRoot 'glib2\ext\glib2\rbgobj_object.c'
-            $old = '    rb_funcall(GOBJ2RVAL(object), ruby_setter, 1, GVAL2RVAL(value));'
-            $new = @(
-              '    {',
-              '        VALUE rb_object = GOBJ2RVAL(object);',
-              '        VALUE rb_value = GVAL2RVAL(value);',
-              '        rb_funcall(rb_object, ruby_setter, 1, rb_value);',
-              '        if (G_TYPE_IS_OBJECT(G_PARAM_SPEC_VALUE_TYPE(pspec))) {',
-              '            G_CHILD_SET(rb_object, rb_intern(g_param_spec_get_name(pspec)), rb_value);',
-              '        }',
-              '    }'
-            ) -join "`n"
-            $content = Read-Text $objectSource
-            if (-not $content.Contains($old)) {
-              Write-Error "glib2 GC repair patch failed: patch anchor was not found in $objectSource."
-              exit 1
-            }
-            Write-Text $objectSource $content.Replace($old, $new.TrimEnd())
-          }
+      - name: Upload native gems build plan (debug info -- survives the runner)
+        uses: actions/upload-artifact@v5
+        with:
+          name: native-gems-build-plan
+          path: ${{ env.NATIVE_GEMS_PLAN }}
+          if-no-files-found: error
 
       - name: Build GTK3 binary gem suite
         shell: powershell
@@ -1128,7 +978,7 @@ jobs:
       # the next one, minutes apart within the same run -- distinct from the real,
       # 90-day-retention final artifact the smoke job uploads once it's done.
       - name: Upload packaged runtime gem bundle (intermediate, cross-job relay)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ruby4-bundled-gems-pkg-dir-intermediate
           path: pkg/*
@@ -1147,7 +997,7 @@ jobs:
 
     steps:
       - name: Download packaged runtime gem bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: ruby4-bundled-gems-pkg-dir-intermediate
           path: pkg
@@ -1273,7 +1123,7 @@ jobs:
           Copy-Item (Join-Path $pkgDir 'install-runtime-gems.cmd') (Join-Path $distPkg 'install-runtime-gems.cmd') -Force
 
       - name: Upload Ruby4 bundled gems
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ruby4-bundled-gems-windows-ucrt64
           path: dist/pkg/*
