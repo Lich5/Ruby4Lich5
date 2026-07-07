@@ -66,17 +66,28 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Validate inputs
         shell: powershell
+        env:
+          RUBY_INSTALLER_VERSION_INPUT: ${{ inputs.ruby-installer-version }}
+          RUBY_GNOME_VERSION_INPUT: ${{ inputs.ruby-gnome-version }}
+          CAIRO_VERSION_INPUT: ${{ inputs.cairo-version }}
+          RUNTIME_GEMS_INPUT: ${{ inputs.runtime-gems }}
+          NATIVE_RUNTIME_GEMS_INPUT: ${{ inputs.native-runtime-gems }}
+          DIAGNOSTIC_MKMF_LOGS_INPUT: ${{ inputs.diagnostic-mkmf-logs }}
         run: |
-          $rubyInstallerVersion = '${{ inputs.ruby-installer-version }}'
-          $rubyGnomeVersion = '${{ inputs.ruby-gnome-version }}'
-          $cairoVersion = '${{ inputs.cairo-version }}'
-          $runtimeGems = '${{ inputs.runtime-gems }}'
-          $nativeRuntimeGems = '${{ inputs.native-runtime-gems }}'
-          $diagnosticMkmfLogs = '${{ inputs.diagnostic-mkmf-logs }}'
+          # Read via $env:, not spliced directly into the script text as a quoted
+          # expression -- a single quote in a workflow_dispatch input could
+          # otherwise break out of the string and inject arbitrary PowerShell
+          # before any of the validation below ever runs.
+          $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION_INPUT
+          $rubyGnomeVersion = $env:RUBY_GNOME_VERSION_INPUT
+          $cairoVersion = $env:CAIRO_VERSION_INPUT
+          $runtimeGems = $env:RUNTIME_GEMS_INPUT
+          $nativeRuntimeGems = $env:NATIVE_RUNTIME_GEMS_INPUT
+          $diagnosticMkmfLogs = $env:DIAGNOSTIC_MKMF_LOGS_INPUT
 
           if ($rubyInstallerVersion -notmatch '^\d+\.\d+\.\d+-\d+$') {
             Write-Error "ruby-installer-version must look like N.N.N-N, for example 4.0.5-1; received '$rubyInstallerVersion'."
@@ -115,7 +126,7 @@ jobs:
       # there is no second pacman pass into a separate C:\msys64 root.
       - name: Install MSYS2 UCRT build surface
         id: msys2
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
         with:
           msystem: UCRT64
           update: true
@@ -487,7 +498,7 @@ jobs:
           Write-Host "::endgroup::"
 
       - name: Upload native gems build plan (debug info -- survives the runner)
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: native-gems-build-plan
           path: ${{ env.NATIVE_GEMS_PLAN }}
@@ -915,9 +926,22 @@ jobs:
             exit $LASTEXITCODE
           }
 
+          # Ask Ruby itself for its gem-cache ABI directory name (e.g. "4.0.0")
+          # rather than deriving it from $env:RUBY_INSTALLER_VERSION -- RubyGems
+          # names this directory after RbConfig::CONFIG['ruby_version'], which is
+          # always X.Y.0 regardless of the exact patch/teeny version, and asking
+          # the real running Ruby is the one source that can't drift out of sync
+          # with a second ABI series (e.g. 3.4.x) if one is ever added alongside
+          # today's 4.0.x.
+          $rubyAbiDir = & $rubyExe -e "print RbConfig::CONFIG['ruby_version']"
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($rubyAbiDir)) {
+            Write-Error "Runtime bundle failed: could not determine Ruby's gem-cache ABI directory name."
+            exit 1
+          }
+
           $cacheRoots = @(
-            (Join-Path $rubyRoot 'lib\ruby\gems\4.0.0\cache'),
-            (Join-Path $env:USERPROFILE '.local\share\gem\ruby\4.0.0\cache')
+            (Join-Path $rubyRoot "lib\ruby\gems\$rubyAbiDir\cache"),
+            (Join-Path $env:USERPROFILE ".local\share\gem\ruby\$rubyAbiDir\cache")
           ) | Where-Object { Test-Path $_ } | Sort-Object -Unique
           $manifestFiles = [System.Collections.Generic.List[string]]::new()
           foreach ($gemName in @('glib2', 'gobject-introspection', 'gio2', 'cairo', 'cairo-gobject', 'pango', 'gdk_pixbuf2', 'atk', 'gdk3', 'gtk3')) {
@@ -1005,7 +1029,7 @@ jobs:
       # the next one, minutes apart within the same run -- distinct from the real,
       # 90-day-retention final artifact the smoke job uploads once it's done.
       - name: Upload packaged runtime gem bundle (intermediate, cross-job relay)
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: ruby4-bundled-gems-pkg-dir-intermediate
           path: pkg/*
@@ -1024,7 +1048,7 @@ jobs:
 
     steps:
       - name: Download packaged runtime gem bundle
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: ruby4-bundled-gems-pkg-dir-intermediate
           path: pkg
@@ -1150,7 +1174,7 @@ jobs:
           Copy-Item (Join-Path $pkgDir 'install-runtime-gems.cmd') (Join-Path $distPkg 'install-runtime-gems.cmd') -Force
 
       - name: Upload Ruby4 bundled gems
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: ruby4-bundled-gems-windows-ucrt64
           path: dist/pkg/*

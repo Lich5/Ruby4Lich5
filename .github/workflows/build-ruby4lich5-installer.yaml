@@ -45,7 +45,7 @@ jobs:
       # the current repo, which does not contain lich.rbw/Gemfile/lib below and would fail
       # this step outright.
       - name: Checkout Lich source
-        uses: actions/checkout@v5
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: elanthia-online/lich-5
           ref: ${{ inputs.lich-tag }}
@@ -78,7 +78,7 @@ jobs:
           zip -qr lich-5.zip Lich5/
 
       - name: Upload Lich payload
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: lich-payload
           path: lich-5.zip
@@ -98,10 +98,10 @@ jobs:
       # lich-tag here (as the previous version of this file did) meant a valid Lich ref
       # could point at a commit where these files don't exist, or vice versa.
       - name: Checkout installer assets
-        uses: actions/checkout@v5
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Restore Lich payload
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: lich-payload
       - name: Expand Lich payload
@@ -110,6 +110,8 @@ jobs:
 
       - name: Resolve latest RubyInstaller in series
         shell: powershell
+        env:
+          RUBY_SERIES_INPUT: ${{ inputs.ruby-series }}
         run: |
           # Not an ABI compatibility guard -- per docs/DECISIONS.md Phase 6, ruby-series is
           # a real per-build parameter, not hardcoded to one literal value, so a future ABI
@@ -118,7 +120,10 @@ jobs:
           # (the same trust already extended to every other input here). Only one Ruby ABI
           # (4.0.x) is real today, so this is untested against an actual mismatch -- revisit
           # with real manifest/metadata validation once a second ABI (e.g. 4.1.x) exists.
-          $series = '${{ inputs.ruby-series }}'
+          # Read via $env:, not spliced into the script text -- a single quote in the
+          # input could otherwise break out of the string and inject arbitrary PowerShell
+          # before the format check below ever runs.
+          $series = $env:RUBY_SERIES_INPUT
           if ($series -notmatch '^\d+\.\d+$') { Write-Error "ruby-series must look like 4.0; got '$series'."; exit 1 }
           $escaped = [regex]::Escape($series)
           $rels = gh api repos/oneclick/rubyinstaller2/releases --paginate | ConvertFrom-Json
@@ -152,9 +157,15 @@ jobs:
 
       - name: Fetch gem bundle from Release (public, no secret)
         shell: powershell
+        env:
+          GEM_REPO_INPUT: ${{ inputs.gem-repo }}
+          GEM_RELEASE_TAG_INPUT: ${{ inputs.gem-release-tag }}
         run: |
-          $repo = '${{ inputs.gem-repo }}'
-          $tag  = '${{ inputs.gem-release-tag }}'
+          # Read via $env:, not spliced into the script text -- a single quote in
+          # either input could otherwise break out of the string and inject
+          # arbitrary PowerShell.
+          $repo = $env:GEM_REPO_INPUT
+          $tag  = $env:GEM_RELEASE_TAG_INPUT
           if ([string]::IsNullOrWhiteSpace($tag)) {
             $tag = gh api "repos/$repo/releases" --jq '.[0].tag_name'
             if ([string]::IsNullOrWhiteSpace($tag)) { Write-Error "No releases on $repo."; exit 1 }
@@ -211,8 +222,13 @@ jobs:
       # the prototype's "app-version"/APP_VERSION, which conflated the two.
       - name: Resolve Lich version
         shell: powershell
+        env:
+          APP_VERSION_INPUT: ${{ inputs.app-version }}
         run: |
-          $v = '${{ inputs.app-version }}'
+          # Read via $env:, not spliced into the script text -- a single quote in
+          # the input could otherwise break out of the string and inject arbitrary
+          # PowerShell.
+          $v = $env:APP_VERSION_INPUT
           if ([string]::IsNullOrWhiteSpace($v) -and (Test-Path .release-please-manifest.json)) {
             $v = (Get-Content .release-please-manifest.json -Raw | ConvertFrom-Json).'.'
           }
@@ -240,7 +256,7 @@ jobs:
           Get-Item .\Output\Ruby4Lich5.exe | ForEach-Object { Write-Host "Built: $($_.Name) ($([math]::Round($_.Length/1MB,1)) MB)" }
 
       - name: Upload installer
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: ruby4lich5-installer
           path: .\Output\Ruby4Lich5.exe
