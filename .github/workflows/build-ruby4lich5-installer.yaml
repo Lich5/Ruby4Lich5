@@ -2,9 +2,18 @@ name: Build Ruby4Lich5 Installer (baked)
 
 # Lives on Lich5/lich-5 (the build/test fork). Builds the baked, non-DevKit
 # installer: a stock RubyInstaller tree (installed via .exe with /components=ruby) with the precompiled binary gems
-# gem-installed straight in on the runner (no MSYS2, no compile, no prune), plus
-# the Lich payload. The installer just lays the finished tree down -- one app,
-# file-copy fast. Compiles Ruby4Lich5-installer.iss with Inno Setup.
+# gem-installed straight in on the runner (no MSYS2, no compile, no prune). The
+# installer just lays that finished tree down -- one app, file-copy fast.
+# Compiles Ruby4Lich5-installer.iss with Inno Setup.
+#
+# Lich itself is NOT part of this build anymore -- Ruby4Lich5-installer.iss
+# fetches it at install time instead (fetch-lich.ps1), matching how a new
+# Lich release can land without a human pushing it through Ruby4Lich5's front
+# door first ("one team, two repos" -- see docs/PUNCHLIST-remaining-work.md's
+# Item 6 sections). There used to be a build_lich_payload job here that
+# checked out Lich's source, zipped it, and fed it into this build -- retired
+# together with the .iss change that stopped consuming it, not left as dead
+# CI work alongside a design it no longer matches.
 
 on:
   workflow_dispatch:
@@ -16,97 +25,25 @@ on:
       gem-repo:
         description: "Repo publishing the gem-bundle Release."
         required: false
-        default: "Lich5/lich5-gtk3-gems"
+        default: "Lich5/Ruby4Lich5"
       gem-release-tag:
-        description: "Gem-bundle Release tag to pull. Empty = newest release (incl. prerelease)."
+        description: "Gem-bundle Release tag to pull. Defaults to the known-good roll-up bundle -- Lich5/Ruby4Lich5 now hosts several differently-scoped releases at once (per-gem, GTK3-only, roll-up), so 'newest on the repo' is no longer a safe empty-string fallback the way it was against a single-purpose repo."
         required: false
-        default: ""
-      lich-tag:
-        description: "Lich ref/tag to build from. Empty = the ref this workflow is dispatched on."
-        required: false
-        default: ""
-      app-version:
-        description: "Lich version label (feeds LichVersion, not InstallerVersion -- see docs/DECISIONS.md Phase 1 section 4/5). Empty = read .release-please-manifest.json, else 0.0.0-dev."
-        required: false
-        default: ""
+        default: "Lich5-Ruby4.0-gem-bundle-windows-ucrt64-beta.0"
 
 permissions:
   contents: read
 
 jobs:
-  build_lich_payload:
-    name: Assemble Lich payload
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      # Explicit repository: this job assembles the Lich payload from Lich's own source,
-      # which lives in elanthia-online/lich-5 -- a different repo from wherever this
-      # workflow file itself lives. Without repository: set, actions/checkout defaults to
-      # the current repo, which does not contain lich.rbw/Gemfile/lib below and would fail
-      # this step outright.
-      - name: Checkout Lich source
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: elanthia-online/lich-5
-          ref: ${{ inputs.lich-tag }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      # Verbatim from rebuild-release-assets.yaml -- the "flawless for months" assembly.
-      - name: Create core Lich-5 package
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p Lich5 Lich5/data Lich5/scripts
-          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/alias.lic         > Lich5/scripts/alias.lic
-          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/autostart.lic     > Lich5/scripts/autostart.lic
-          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/ewaggle.lic       > Lich5/scripts/ewaggle.lic
-          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/go2.lic           > Lich5/scripts/go2.lic
-          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/jinx.lic          > Lich5/scripts/jinx.lic
-          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/lich5-update.lic  > Lich5/scripts/lich5-update.lic
-          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/log.lic           > Lich5/scripts/log.lic
-          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/map.lic           > Lich5/scripts/map.lic
-          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/repository.lic    > Lich5/scripts/repository.lic
-          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/vars.lic          > Lich5/scripts/vars.lic
-          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/version.lic       > Lich5/scripts/version.lic
-          curl -fsSL https://raw.githubusercontent.com/elanthia-online/dr-scripts/master/dependency.lic         > Lich5/scripts/dependency.lic
-          curl -fsSL https://raw.githubusercontent.com/elanthia-online/scripts/master/scripts/effect-list.xml   > Lich5/data/effect-list.xml
-          cp lich.rbw Lich5/
-          cp Gemfile  Lich5/
-          cp LICENSE  Lich5/
-          cp -r lib   Lich5/
-          zip -qr lich-5.zip Lich5/
-
-      - name: Upload Lich payload
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
-        with:
-          name: lich-payload
-          path: lich-5.zip
-          if-no-files-found: error
-
   build_installer:
     name: Build installer (windows)
-    needs: build_lich_payload
     runs-on: windows-latest
     timeout-minutes: 45
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      # No repository:/ref: here on purpose -- installer assets (Ruby4Lich5-installer.iss,
-      # fly64.ico) live in this workflow's own repo, at the commit this workflow is
-      # actually running from, independent of whatever Lich ref is being built. Using
-      # lich-tag here (as the previous version of this file did) meant a valid Lich ref
-      # could point at a commit where these files don't exist, or vice versa.
       - name: Checkout installer assets
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Restore Lich payload
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
-        with:
-          name: lich-payload
-      - name: Expand Lich payload
-        shell: bash
-        run: unzip -q lich-5.zip      # -> .\Lich5\
 
       - name: Resolve latest RubyInstaller in series
         shell: powershell
@@ -216,26 +153,6 @@ jobs:
           & $ruby -e "require 'gtk3'; require 'sqlite3'; require 'sequel'; require 'ox'; require 'curses'; Gtk.init; puts 'baked tree OK: ' + RUBY_DESCRIPTION"
           if ($LASTEXITCODE -ne 0) { Write-Error "Baked Ruby tree failed to load the runtime gems."; exit 1 }
 
-      # Resolves the Lich payload's own version -- docs/DECISIONS.md Phase 1 section 4/5:
-      # installer versioning is owned by Ruby4Lich5, not by lich-5, so this is deliberately
-      # read (not generated) and feeds only LichVersion, not InstallerVersion. Renamed from
-      # the prototype's "app-version"/APP_VERSION, which conflated the two.
-      - name: Resolve Lich version
-        shell: powershell
-        env:
-          APP_VERSION_INPUT: ${{ inputs.app-version }}
-        run: |
-          # Read via $env:, not spliced into the script text -- a single quote in
-          # the input could otherwise break out of the string and inject arbitrary
-          # PowerShell.
-          $v = $env:APP_VERSION_INPUT
-          if ([string]::IsNullOrWhiteSpace($v) -and (Test-Path .release-please-manifest.json)) {
-            $v = (Get-Content .release-please-manifest.json -Raw | ConvertFrom-Json).'.'
-          }
-          if ([string]::IsNullOrWhiteSpace($v)) { $v = '0.0.0-dev' }
-          "LICH_VERSION=$v" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "Lich version: $v"
-
       - name: Install Inno Setup
         shell: powershell
         run: |
@@ -244,13 +161,16 @@ jobs:
 
       # InstallerVersion is deliberately not passed here -- Ruby4Lich5's own installer-build
       # identity has no source yet (that's Phase 2 section 6's publish mechanism, not this fix); the
-      # .iss's own #ifndef default applies until that exists.
+      # .iss's own #ifndef default applies until that exists. LichVersion is
+      # deliberately not passed either anymore -- Lich isn't baked in at build
+      # time, so there's nothing to label; the .iss no longer even defines
+      # that preprocessor variable (see its own header comment).
       - name: Compile installer
         shell: powershell
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (!(Test-Path $iscc)) { Write-Error "ISCC not found at $iscc."; exit 1 }
-          & $iscc "/DRubyVersion=$env:RUBY_VERSION" "/DLichVersion=$env:LICH_VERSION" "/DGemBundleVersion=$env:GEM_BUNDLE_VERSION" "Ruby4Lich5-installer.iss"
+          & $iscc "/DRubyVersion=$env:RUBY_VERSION" "/DGemBundleVersion=$env:GEM_BUNDLE_VERSION" "Ruby4Lich5-installer.iss"
           if ($LASTEXITCODE -ne 0) { Write-Error "Inno Setup compile failed."; exit $LASTEXITCODE }
           if (!(Test-Path .\Output\Ruby4Lich5.exe)) { Write-Error "Output\Ruby4Lich5.exe not produced."; exit 1 }
           Get-Item .\Output\Ruby4Lich5.exe | ForEach-Object { Write-Host "Built: $($_.Name) ($([math]::Round($_.Length/1MB,1)) MB)" }

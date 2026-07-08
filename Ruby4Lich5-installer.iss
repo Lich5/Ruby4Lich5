@@ -6,21 +6,36 @@
 ; (they vendor their own DLLs). This installer just lays that finished tree down:
 ; one app, file-copy fast, responsive. DevKit stays optional via ridk.
 ;
+; Lich itself is fetched at INSTALL time, not baked in at CI build time --
+; fetch-lich.ps1 (bundled via [Files] Flags: dontcopy) pulls
+; elanthia-online/lich-5's latest Release, always -- no tag-override plumbing
+; (dropped 2026-07-08 for this iteration; a specific non-latest Lich is
+; available directly from the EO/lich-5 release page today) -- matching what
+; its own release-on-push-stable.yaml already does at build time for the
+; legacy R4LGTK3.iss (same lich-5.zip
+; asset, same resulting Lich5/ folder shape -- verified directly against both
+; the real asset and that real, currently-working workflow before writing
+; this). See docs/PUNCHLIST-remaining-work.md's Item 6 sections for why: Lich
+; can gain a gem requirement without a human pushing it through Ruby4Lich5's
+; front door first ("one team, two repos"), so "always latest" is safe for
+; Lich specifically in a way it explicitly is not for Ruby+Gems, which stay
+; baked.
+;
 ; Build-time injected defines (workflow passes via ISCC /D...):
 ;   RubyVersion       e.g. 4.0.5 (resolved "latest 4.0.x")
-;   LichVersion        the Lich release actually bundled -- read from whichever lich-tag
-;                      was fetched, not generated; see docs/DECISIONS.md Phase 1, item 5.
 ;   GemBundleVersion   the Ruby4Lich5 gem-bundle release actually baked in (stopgap
 ;                      placeholder until Phase 2, item 6's publish mechanism exists)
 ;   InstallerVersion   Ruby4Lich5's own installer-build identity -- independent of both
 ;                      of the above; installer versioning is owned by Ruby4Lich5, not by
 ;                      lich-5 (docs/DECISIONS.md Phase 1, item 4)
+;
+; LichVersion is deliberately NOT a build-time define anymore -- it's only
+; known once fetch-lich.ps1 actually resolves a real tag at install time, so
+; showing one in a static, compile-time AppVerName could be flat wrong the
+; moment "latest" moves past whatever was true when this installer was built.
 
 #ifndef RubyVersion
   #define RubyVersion "4.0.5"
-#endif
-#ifndef LichVersion
-  #define LichVersion "0.0.0"
 #endif
 #ifndef GemBundleVersion
   #define GemBundleVersion "0.0.0-dev"
@@ -38,7 +53,7 @@
 AppId={{edd9ccd7-33cb-4577-a470-fe8fd087eb07}
 AppName={#MyAppName}
 AppVersion={#InstallerVersion}
-AppVerName={#MyAppName} Ruby {#RubyVersion} (Gems {#GemBundleVersion}) & Lich {#LichVersion}
+AppVerName={#MyAppName} Ruby {#RubyVersion} (Gems {#GemBundleVersion}) -- Lich fetched at install
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
@@ -69,12 +84,14 @@ Name: "lich";     Description: "Lich Files";                             Types: 
 Name: "rubygem";  Description: "Ruby {#RubyVersion} (64-bit) with Gems"; Types: full rubyonly
 
 [Tasks]
-; One of these two must default checked: both are "unchecked exclusive" radio-style
-; tasks, but Inno Setup's "exclusive" flag only enforces *at most* one selected, not
-; *exactly* one -- leaving both unchecked let a Full/Lich install complete without ever
-; placing a usable Lich folder anywhere (files stayed only in the hidden R4LInstall
-; staging directory). Desktop/Gemstone IV as the default is the more common case.
-Name: LichGS;  Description: "Place in Desktop ({userdesktop}\Lich5 - preferred for Gemstone IV)";  GroupDescription: "Lich5 Folder Location";  Components: lich;    Flags: exclusive
+; Both deliberately unchecked -- no silent default. NextButtonClick below blocks
+; advancing past this page with the "lich" component active and neither chosen,
+; so an explicit choice is always required rather than assumed on the user's
+; behalf (confirmed real: "lichonly" is a genuine type, Lich can install
+; without Ruby at all, so this can't be gated on "full" specifically -- it's
+; gated on whether the lich component is active, which covers both named
+; types and a hand-picked Custom selection alike).
+Name: LichGS;  Description: "Place in Desktop ({userdesktop}\Lich5 - preferred for Gemstone IV)";  GroupDescription: "Lich5 Folder Location";  Components: lich;    Flags: unchecked exclusive
 Name: LichDR;  Description: "Place in Ruby4Lich5 ({app}\Lich5 - preferred for DragonRealms)";      GroupDescription: "Lich5 Folder Location";  Components: lich;    Flags: unchecked exclusive
 
 [Languages]
@@ -85,9 +102,13 @@ Name: "{app}\R4LInstall"; Attribs: hidden
 
 [Files]
 ; The pre-baked Ruby tree: RubyInstaller + binary gems already installed in, staged by CI at .\ruby.
-Source: ".\ruby\*";    DestDir: "{app}\{#RubyVersion}";                 Components: rubygem; Flags: ignoreversion createallsubdirs recursesubdirs
-Source: ".\fly64.ico"; DestDir: "{app}\R4LInstall";                     Components: lich;    Flags: ignoreversion
-Source: ".\Lich5\*";   DestDir: "{app}\R4LInstall\Lich{#LichVersion}";  Components: lich;    Flags: ignoreversion createallsubdirs recursesubdirs
+Source: ".\ruby\*";    DestDir: "{app}\{#RubyVersion}"; Components: rubygem; Flags: ignoreversion createallsubdirs recursesubdirs
+Source: ".\fly64.ico"; DestDir: "{app}\R4LInstall";     Components: lich;    Flags: ignoreversion
+; Lich itself is NOT staged here anymore -- fetch-lich.ps1 populates
+; {app}\R4LInstall\Lich5 at install time instead (see [Code]). Bundled as a
+; helper script only, extracted to {tmp} for the duration of Setup, never
+; part of the installed tree.
+Source: ".\fetch-lich.ps1"; DestDir: "{tmp}"; Components: lich; Flags: dontcopy
 
 [Registry]
 ; We lay down a tree (no RubyInstaller run), so we set associations + PATH ourselves.
@@ -116,6 +137,101 @@ Filename: "{app}\{#RubyVersion}\bin\ridk.cmd"; Parameters: "install 2 3"; \
   Description: "Install Ruby DevKit (developers -- downloads MSYS2, needs network)"; \
   Components: rubygem; Flags: postinstall nowait skipifsilent unchecked
 
-; Place Lich where the user chose (unchanged from the legacy installer).
-Filename: "{cmd}"; Parameters: "/c""xcopy /i /e /s /y ""{app}\R4LInstall\Lich{#LichVersion}"" ""{userdesktop}\Lich5"""""; Tasks: LichGS
-Filename: "{cmd}"; Parameters: "/c""xcopy /i /e /s /y ""{app}\R4LInstall\Lich{#LichVersion}"" ""{app}\Lich5""""";         Tasks: LichDR
+[Code]
+// Refuses /SILENT and /VERYSILENT outright rather than special-casing around
+// them -- Doug's explicit call: Ruby4Lich5.exe is not meant to support
+// unattended installs at all, not just "don't let silent installs abort on
+// the Lich placement guard below." Fires in InitializeSetup specifically
+// (confirmed via jrsoftware's own docs and canonical example for this exact
+// check): it runs before the wizard form exists, so Result := False aborts
+// Setup immediately -- NextButtonClick's simulated-click behavior in silent
+// mode never gets a chance to run at all. MsgBox (not SuppressibleMsgBox) is
+// deliberate: only an explicit /SUPPRESSMSGBOXES hides it, so the refusal
+// stays visible unless a caller goes out of their way to silence it too --
+// and Log() still records the refusal either way (SetupLogging=yes above).
+function InitializeSetup(): Boolean;
+begin
+  Result := True;
+  if WizardSilent then
+  begin
+    Log('Silent install refused: Ruby4Lich5 does not support unattended installation.');
+    MsgBox('Ruby4Lich5 does not support silent installation. ' +
+           'Please run Setup interactively.', mbCriticalError, MB_OK);
+    Result := False;
+  end;
+end;
+
+// Blocks leaving the Tasks page with the "lich" component active and neither
+// LichGS nor LichDR chosen -- covers "full" and "lichonly" alike (and a
+// hand-picked Custom selection with lich ticked), since what actually matters
+// is whether Lich is going to be installed at all, not which named type got
+// selected to get there.
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (CurPageID = wpSelectTasks) and IsComponentSelected('lich') then
+  begin
+    if not (WizardIsTaskSelected('LichGS') or WizardIsTaskSelected('LichDR')) then
+    begin
+      MsgBox('Please choose where to place your Lich5 folder (Gemstone IV or DragonRealms) before continuing.', mbError, MB_OK);
+      Result := False;
+    end;
+  end;
+end;
+
+// Fetches Lich (see fetch-lich.ps1's own header for the full design), then
+// places it at the user's chosen location, once the main file-copy step
+// finishes. Both steps live here in Code rather than the fetch in Code plus
+// the copy as a [Run] entry, as originally built -- confirmed against
+// jrsoftware/issrc's TMainForm.Install: ProcessRunEntries (which runs [Run])
+// executes, and only afterward does SetStep(ssPostInstall) fire
+// CurStepChanged. A [Run]-section xcopy would
+// therefore always run BEFORE this fetch, against an empty/nonexistent
+// source -- Lich would never reach the user's folder. Doing both steps here,
+// in order, is the only way to guarantee the copy sees real content.
+// Only runs when the "lich" component is actually selected; aborts Setup with
+// a clear message on failure rather than copying nothing silently.
+// Always fetches latest -- no tag-override plumbing (2026-07-08: dropped for
+// this iteration, see fetch-lich.ps1's own header for why).
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ScriptPath, DestDir, CmdExe, XcopyDest, Params: String;
+  ResultCode: Integer;
+begin
+  if (CurStep = ssPostInstall) and IsComponentSelected('lich') then
+  begin
+    ExtractTemporaryFile('fetch-lich.ps1');
+    ScriptPath := ExpandConstant('{tmp}\fetch-lich.ps1');
+    DestDir := ExpandConstant('{app}\R4LInstall\Lich5');
+
+    Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" -DestDir "' + DestDir + '"';
+
+    if not Exec('powershell.exe', Params, '', SW_SHOW, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+    begin
+      MsgBox('Failed to download Lich (network unreachable, or GitHub could not be reached). ' +
+             'Setup cannot continue with the Lich component selected. ' +
+             'You can re-run Setup once connected, or install Ruby/Gems only for now.',
+             mbCriticalError, MB_OK);
+      Abort;
+    end;
+
+    // Place Lich where the user chose (see [Tasks] -- LichGS/LichDR are
+    // unchecked exclusive, and NextButtonClick already guarantees exactly one
+    // is selected whenever "lich" is active, so this is never a no-op).
+    if WizardIsTaskSelected('LichGS') or WizardIsTaskSelected('LichDR') then
+    begin
+      CmdExe := ExpandConstant('{cmd}');
+      if WizardIsTaskSelected('LichGS') then
+        XcopyDest := ExpandConstant('{userdesktop}\Lich5')
+      else
+        XcopyDest := ExpandConstant('{app}\Lich5');
+
+      Params := '/c xcopy /i /e /s /y "' + DestDir + '" "' + XcopyDest + '"';
+      if not Exec(CmdExe, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+      begin
+        MsgBox('Lich was downloaded but could not be placed at ' + XcopyDest + '.', mbCriticalError, MB_OK);
+        Abort;
+      end;
+    end;
+  end;
+end;
