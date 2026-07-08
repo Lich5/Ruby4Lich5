@@ -96,7 +96,30 @@ if ($MyInvocation.InvocationName -ne '.') {
     if ([string]::IsNullOrWhiteSpace($DestDir)) {
       throw "DestDir is required. Usage: fetch-lich.ps1 -DestDir <path>"
     }
-    $resolvedTag = Invoke-LichFetch -DestDir $DestDir
+
+    # Hard backstop on top of the -TimeoutSec values inside Invoke-LichFetch:
+    # -TimeoutSec is a stall-detection timeout, but Invoke-WebRequest -OutFile
+    # has a documented, reported bug where it doesn't reliably honor -TimeoutSec
+    # and can hang anyway (PowerShell/PowerShell#4679). Running the fetch as a
+    # background job lets Wait-Job -Timeout kill it at the OS-process level
+    # regardless of which layer's timeout actually fires -- confirmed locally
+    # (Start-Job + Wait-Job -Timeout correctly detects a still-running job and
+    # Remove-Job -Force reliably tears it down). Exec's ewWaitUntilTerminated
+    # wait in the .iss is now bounded no matter what. Only wraps this
+    # real-execution path, not Invoke-LichFetch itself -- Start-Job runs in a
+    # separate process with its own session state, which Pester's Mock cannot
+    # reach into, so spec/powershell/fetch-lich.Tests.ps1's direct, mocked
+    # calls to Invoke-LichFetch are unaffected.
+    $job = Start-Job -ScriptBlock ${function:Invoke-LichFetch} -ArgumentList $DestDir
+    try {
+      if (-not (Wait-Job -Job $job -Timeout 180)) {
+        throw "Lich fetch timed out after 180s -- network likely stalled or unreachable."
+      }
+      $resolvedTag = Receive-Job -Job $job -ErrorAction Stop
+    } finally {
+      Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    }
+
     Write-Output $resolvedTag
     exit 0
   } catch {

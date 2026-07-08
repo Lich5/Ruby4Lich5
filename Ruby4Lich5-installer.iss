@@ -138,6 +138,29 @@ Filename: "{app}\{#RubyVersion}\bin\ridk.cmd"; Parameters: "install 2 3"; \
   Components: rubygem; Flags: postinstall nowait skipifsilent unchecked
 
 [Code]
+// Refuses /SILENT and /VERYSILENT outright rather than special-casing around
+// them -- Doug's explicit call: Ruby4Lich5.exe is not meant to support
+// unattended installs at all, not just "don't let silent installs abort on
+// the Lich placement guard below." Fires in InitializeSetup specifically
+// (confirmed via jrsoftware's own docs and canonical example for this exact
+// check): it runs before the wizard form exists, so Result := False aborts
+// Setup immediately -- NextButtonClick's simulated-click behavior in silent
+// mode never gets a chance to run at all. MsgBox (not SuppressibleMsgBox) is
+// deliberate: only an explicit /SUPPRESSMSGBOXES hides it, so the refusal
+// stays visible unless a caller goes out of their way to silence it too --
+// and Log() still records the refusal either way (SetupLogging=yes above).
+function InitializeSetup(): Boolean;
+begin
+  Result := True;
+  if WizardSilent then
+  begin
+    Log('Silent install refused: Ruby4Lich5 does not support unattended installation.');
+    MsgBox('Ruby4Lich5 does not support silent installation. ' +
+           'Please run Setup interactively.', mbCriticalError, MB_OK);
+    Result := False;
+  end;
+end;
+
 // Blocks leaving the Tasks page with the "lich" component active and neither
 // LichGS nor LichDR chosen -- covers "full" and "lichonly" alike (and a
 // hand-picked Custom selection with lich ticked), since what actually matters
