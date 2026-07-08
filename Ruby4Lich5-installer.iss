@@ -200,13 +200,24 @@ var
 begin
   if (CurStep = ssPostInstall) and IsComponentSelected('lich') then
   begin
+    // Custom status text, since the fetch is a blocking Exec below with its
+    // own console now hidden (SW_HIDE -- it was SW_SHOW; nothing about this
+    // call needed a visible window, that was just carried over from a
+    // different, non-blocking [Run] step without re-examining it for this
+    // spot). Repaint, not just setting Caption, is required here: Exec blocks
+    // the UI thread, so the normal Windows message pump that would otherwise
+    // paint the new text never runs before the wait begins -- Repaint forces
+    // the label to draw immediately instead of waiting for that pump.
+    WizardForm.StatusLabel.Caption := 'Fetching latest Lich...';
+    WizardForm.StatusLabel.Repaint;
+
     ExtractTemporaryFile('fetch-lich.ps1');
     ScriptPath := ExpandConstant('{tmp}\fetch-lich.ps1');
     DestDir := ExpandConstant('{app}\R4LInstall\Lich5');
 
     Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" -DestDir "' + DestDir + '"';
 
-    if not Exec('powershell.exe', Params, '', SW_SHOW, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+    if not Exec('powershell.exe', Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
     begin
       MsgBox('Failed to download Lich (network unreachable, or GitHub could not be reached). ' +
              'Setup cannot continue with the Lich component selected. ' +

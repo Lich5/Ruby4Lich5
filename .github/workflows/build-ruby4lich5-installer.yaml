@@ -30,6 +30,10 @@ on:
         description: "Gem-bundle Release tag to pull. Defaults to the known-good roll-up bundle -- Lich5/Ruby4Lich5 now hosts several differently-scoped releases at once (per-gem, GTK3-only, roll-up), so 'newest on the repo' is no longer a safe empty-string fallback the way it was against a single-purpose repo."
         required: false
         default: "Lich5-Ruby4.0-gem-bundle-windows-ucrt64-beta.0"
+      installer-version:
+        description: "Ruby4Lich5's own installer-build identity (AppVersion) -- independent of RubyVersion/GemBundleVersion, owned by Ruby4Lich5 (docs/DECISIONS.md Phase 1, item 4). Bump this per dispatch when cutting a real release; the default is a real, explicit placeholder, not the .iss's own dev-only 0.0.0 fallback."
+        required: false
+        default: "0.1.0-beta.0"
 
 permissions:
   contents: read
@@ -159,18 +163,20 @@ jobs:
           choco feature disable -n=showDownloadProgress
           choco install -y --no-progress innosetup
 
-      # InstallerVersion is deliberately not passed here -- Ruby4Lich5's own installer-build
-      # identity has no source yet (that's Phase 2 section 6's publish mechanism, not this fix); the
-      # .iss's own #ifndef default applies until that exists. LichVersion is
-      # deliberately not passed either anymore -- Lich isn't baked in at build
-      # time, so there's nothing to label; the .iss no longer even defines
-      # that preprocessor variable (see its own header comment).
+      # LichVersion is deliberately not passed anymore -- Lich isn't baked in at
+      # build time, so there's nothing to label; the .iss no longer even
+      # defines that preprocessor variable (see its own header comment).
       - name: Compile installer
         shell: powershell
+        env:
+          INSTALLER_VERSION_INPUT: ${{ inputs.installer-version }}
         run: |
+          # Read via $env:, not spliced into the ISCC argument text -- same
+          # injection-safety reasoning as the gem-repo/gem-release-tag inputs
+          # above.
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (!(Test-Path $iscc)) { Write-Error "ISCC not found at $iscc."; exit 1 }
-          & $iscc "/DRubyVersion=$env:RUBY_VERSION" "/DGemBundleVersion=$env:GEM_BUNDLE_VERSION" "Ruby4Lich5-installer.iss"
+          & $iscc "/DRubyVersion=$env:RUBY_VERSION" "/DGemBundleVersion=$env:GEM_BUNDLE_VERSION" "/DInstallerVersion=$env:INSTALLER_VERSION_INPUT" "Ruby4Lich5-installer.iss"
           if ($LASTEXITCODE -ne 0) { Write-Error "Inno Setup compile failed."; exit $LASTEXITCODE }
           if (!(Test-Path .\Output\Ruby4Lich5.exe)) { Write-Error "Output\Ruby4Lich5.exe not produced."; exit 1 }
           Get-Item .\Output\Ruby4Lich5.exe | ForEach-Object { Write-Host "Built: $($_.Name) ($([math]::Round($_.Length/1MB,1)) MB)" }
