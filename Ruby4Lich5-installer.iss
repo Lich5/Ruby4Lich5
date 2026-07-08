@@ -137,12 +137,6 @@ Filename: "{app}\{#RubyVersion}\bin\ridk.cmd"; Parameters: "install 2 3"; \
   Description: "Install Ruby DevKit (developers -- downloads MSYS2, needs network)"; \
   Components: rubygem; Flags: postinstall nowait skipifsilent unchecked
 
-; Place Lich where the user chose. Source is now the fetch-time-populated
-; folder (see [Code]'s CurStepChanged), not a compile-time {#LichVersion}
-; path -- fetch-lich.ps1 always lands content at exactly this fixed location.
-Filename: "{cmd}"; Parameters: "/c""xcopy /i /e /s /y ""{app}\R4LInstall\Lich5"" ""{userdesktop}\Lich5"""""; Tasks: LichGS
-Filename: "{cmd}"; Parameters: "/c""xcopy /i /e /s /y ""{app}\R4LInstall\Lich5"" ""{app}\Lich5""""";         Tasks: LichDR
-
 [Code]
 // Blocks leaving the Tasks page with the "lich" component active and neither
 // LichGS nor LichDR chosen -- covers "full" and "lichonly" alike (and a
@@ -162,16 +156,23 @@ begin
   end;
 end;
 
-// Fetches Lich (see fetch-lich.ps1's own header for the full design) once the
-// main file-copy step finishes, before [Run] executes -- so the xcopy entries
-// above always find real content at {app}\R4LInstall\Lich5 by the time they run.
+// Fetches Lich (see fetch-lich.ps1's own header for the full design), then
+// places it at the user's chosen location, once the main file-copy step
+// finishes. Both steps live here in Code rather than the fetch in Code plus
+// the copy as a [Run] entry, as originally built -- confirmed against
+// jrsoftware/issrc's TMainForm.Install: ProcessRunEntries (which runs [Run])
+// executes, and only afterward does SetStep(ssPostInstall) fire
+// CurStepChanged. A [Run]-section xcopy would
+// therefore always run BEFORE this fetch, against an empty/nonexistent
+// source -- Lich would never reach the user's folder. Doing both steps here,
+// in order, is the only way to guarantee the copy sees real content.
 // Only runs when the "lich" component is actually selected; aborts Setup with
-// a clear message on failure rather than letting xcopy silently copy nothing.
+// a clear message on failure rather than copying nothing silently.
 // Always fetches latest -- no tag-override plumbing (2026-07-08: dropped for
 // this iteration, see fetch-lich.ps1's own header for why).
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  ScriptPath, DestDir, Params: String;
+  ScriptPath, DestDir, CmdExe, XcopyDest, Params: String;
   ResultCode: Integer;
 begin
   if (CurStep = ssPostInstall) and IsComponentSelected('lich') then
@@ -189,6 +190,25 @@ begin
              'You can re-run Setup once connected, or install Ruby/Gems only for now.',
              mbCriticalError, MB_OK);
       Abort;
+    end;
+
+    // Place Lich where the user chose (see [Tasks] -- LichGS/LichDR are
+    // unchecked exclusive, and NextButtonClick already guarantees exactly one
+    // is selected whenever "lich" is active, so this is never a no-op).
+    if WizardIsTaskSelected('LichGS') or WizardIsTaskSelected('LichDR') then
+    begin
+      CmdExe := ExpandConstant('{cmd}');
+      if WizardIsTaskSelected('LichGS') then
+        XcopyDest := ExpandConstant('{userdesktop}\Lich5')
+      else
+        XcopyDest := ExpandConstant('{app}\Lich5');
+
+      Params := '/c xcopy /i /e /s /y "' + DestDir + '" "' + XcopyDest + '"';
+      if not Exec(CmdExe, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+      begin
+        MsgBox('Lich was downloaded but could not be placed at ' + XcopyDest + '.', mbCriticalError, MB_OK);
+        Abort;
+      end;
     end;
   end;
 end;

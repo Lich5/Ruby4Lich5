@@ -29,7 +29,11 @@
 # guard is a no-op during tests.
 
 param(
-  [Parameter(Mandatory = $true)][string]$DestDir
+  # Not Mandatory here -- spec/powershell/fetch-lich.Tests.ps1 dot-sources this
+  # file with no args to reach Invoke-LichFetch directly, and a Mandatory
+  # top-level param blocks on a missing-value prompt in that non-interactive
+  # context. Required-ness is enforced below, only on the direct-execution path.
+  [string]$DestDir
 )
 
 function Invoke-LichFetch {
@@ -46,7 +50,13 @@ function Invoke-LichFetch {
 
   $headers = @{ 'User-Agent' = 'Ruby4Lich5-Installer' }
 
-  $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/elanthia-online/lich-5/releases/latest' -Headers $headers -UseBasicParsing
+  # -TimeoutSec explicitly on both network calls below -- Invoke-RestMethod and
+  # Invoke-WebRequest default to TimeoutSec=0 (indefinite) on Windows PowerShell
+  # 5.1, so a dead/firewalled connection would otherwise hang Exec's
+  # ewWaitUntilTerminated wait in the .iss forever, with no cancel path for the
+  # user. 30s covers the small JSON metadata call (plus slow DNS, which can
+  # itself take up to 15s); 120s covers the zip download on a slow connection.
+  $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/elanthia-online/lich-5/releases/latest' -Headers $headers -UseBasicParsing -TimeoutSec 30
 
   $tag = $release.tag_name
   $asset = $release.assets | Where-Object { $_.name -eq 'lich-5.zip' }
@@ -54,8 +64,13 @@ function Invoke-LichFetch {
     throw "lich-5.zip not found in release $tag"
   }
 
-  $zipPath = Join-Path $env:TEMP 'lich-5-fetch.zip'
-  Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -Headers $headers -UseBasicParsing
+  # [System.IO.Path]::GetTempPath() over $env:TEMP -- the latter is Windows-only
+  # and is $null under pwsh on macOS/Linux, which is where this suite actually
+  # runs locally (this script's only real execution target is still Windows,
+  # via powershell.exe from Inno Setup's [Code]; GetTempPath() resolves
+  # correctly there too).
+  $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) 'lich-5-fetch.zip'
+  Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -Headers $headers -UseBasicParsing -TimeoutSec 120
 
   $parent = Split-Path $DestDir -Parent
   if (Test-Path $DestDir) {
@@ -78,6 +93,9 @@ function Invoke-LichFetch {
 if ($MyInvocation.InvocationName -ne '.') {
   $ErrorActionPreference = 'Stop'
   try {
+    if ([string]::IsNullOrWhiteSpace($DestDir)) {
+      throw "DestDir is required. Usage: fetch-lich.ps1 -DestDir <path>"
+    }
     $resolvedTag = Invoke-LichFetch -DestDir $DestDir
     Write-Output $resolvedTag
     exit 0
