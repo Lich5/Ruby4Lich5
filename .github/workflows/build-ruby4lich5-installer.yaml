@@ -27,13 +27,13 @@ on:
         required: false
         default: "Lich5/Ruby4Lich5"
       gem-release-tag:
-        description: "Gem-bundle Release tag to pull. Defaults to the known-good roll-up bundle -- Lich5/Ruby4Lich5 now hosts several differently-scoped releases at once (per-gem, GTK3-only, roll-up), so 'newest on the repo' is no longer a safe empty-string fallback the way it was against a single-purpose repo."
+        description: "Gem-bundle Release tag to pull. Defaults to the known-good production roll-up bundle -- Lich5/Ruby4Lich5 now hosts several differently-scoped releases at once (per-gem, GTK3-only, roll-up), so 'newest on the repo' is no longer a safe empty-string fallback the way it was against a single-purpose repo. Never the 'Latest'-flagged release on this repo by design -- gem releases intentionally never claim that slot; see docs/PUNCHLIST-remaining-work.md's versioning section."
         required: false
-        default: "Lich5-Ruby4.0-gem-bundle-windows-ucrt64-beta.0"
+        default: "Lich5-Ruby4.0-gem-bundle-windows-ucrt64-v001"
       installer-version:
-        description: "Ruby4Lich5's own installer-build identity (AppVersion) -- independent of RubyVersion/GemBundleVersion, owned by Ruby4Lich5 (docs/DECISIONS.md Phase 1, item 4). Bump this per dispatch when cutting a real release; the default is a real, explicit placeholder, not the .iss's own dev-only 0.0.0 fallback."
+        description: "Ruby4Lich5's own installer-build identity (AppVersion), shaped Ruby.Gems.CI (e.g. 040.001.002) -- independent of RubyVersion/GemBundleVersion, owned by Ruby4Lich5 (docs/DECISIONS.md Phase 1, item 4). See docs/PUNCHLIST-remaining-work.md's versioning section for what each field means and how it's derived; bump this per dispatch when cutting a real release."
         required: false
-        default: "0.1.0-beta.0"
+        default: "040.001.002"
 
 permissions:
   contents: read

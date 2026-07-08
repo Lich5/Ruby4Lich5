@@ -1,0 +1,172 @@
+# Proposes the next Ruby4Lich5 installer version (Ruby.Gems.CI serialization,
+# tags shaped R4L5-vRRR.GGG.CCC) as a PR comment, for human review -- it never
+# assigns a version itself. See docs/PUNCHLIST-remaining-work.md's versioning
+# section for the full design and why each field means what it does.
+#
+# Ruby and Gems are direct derivations, not counters: Ruby comes straight from
+# build-ruby4lich5-installer.yaml's own ruby-series default (e.g. "4.0" ->
+# "040"); Gems comes straight from that same file's gem-release-tag default's
+# own "-vNNN" suffix (e.g. "...-v001" -> "001"). Neither needs history.
+#
+# CI is the one true counter: it only increments when
+# Ruby4Lich5-installer.iss, fetch-lich.ps1, or this repo's own
+# build-ruby4lich5-installer.yaml actually changed since the latest R4L5-v*
+# release's own tag -- checked via a real commit comparison (base is the tag
+# name itself, not release.target_commitish; that field is just the literal
+# branch-name string passed at creation time, e.g. "main", never resolved to
+# a SHA, so it silently drifts to whatever main currently is on every run
+# instead of staying pinned to release time -- confirmed empirically against
+# every release in this repo before using the tag name instead). Not assumed
+# from the PR's file list, since a PR can touch those paths without the diff
+# actually changing anything meaningful (e.g. a comment-only edit) -- though
+# as a first pass this treats any diff in those files as CI-worthy; refine
+# later if that proves too eager.
+#
+# Only the installer family ever claims GitHub's repo-wide "Latest" -- gem
+# releases are deliberately excluded (see docs/PUNCHLIST-remaining-work.md),
+# so R4L5-v* is the only tag family this workflow ever needs to filter for.
+
+name: Propose Installer Version
+
+on:
+  pull_request:
+    paths:
+      - "Ruby4Lich5-installer.iss"
+      - "fetch-lich.ps1"
+      - ".github/workflows/build-ruby4lich5-installer.yaml"
+      - ".github/workflows/propose-installer-version.yaml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Derive and propose the next R4L5-v triple
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = context.payload.pull_request.number;
+            const headSha = context.payload.pull_request.head.sha;
+            const MARKER = '<!-- r4l5-version-proposal -->';
+
+            const buildWorkflowText = fs.readFileSync('.github/workflows/build-ruby4lich5-installer.yaml', 'utf8');
+
+            function extractDefault(inputName) {
+              const re = new RegExp(inputName + ':\\s*\\n(?:.*\\n)*?\\s*default:\\s*"([^"]+)"');
+              const m = buildWorkflowText.match(re);
+              if (!m) { throw new Error(`Could not find a default for '${inputName}' in build-ruby4lich5-installer.yaml`); }
+              return m[1];
+            }
+
+            const rubySeries = extractDefault('ruby-series'); // e.g. "4.0"
+            const gemReleaseTag = extractDefault('gem-release-tag'); // e.g. "...-v001"
+
+            const rubyPartsMatch = rubySeries.match(/^(\d+)\.(\d+)$/);
+            if (!rubyPartsMatch) { throw new Error(`ruby-series default '${rubySeries}' doesn't look like 'N.N'`); }
+            const rubyField = (rubyPartsMatch[1] + rubyPartsMatch[2]).padStart(3, '0');
+
+            const gemsMatch = gemReleaseTag.match(/-v(\d+)$/);
+            if (!gemsMatch) { throw new Error(`gem-release-tag default '${gemReleaseTag}' doesn't end in '-vNNN'`); }
+            const gemsField = gemsMatch[1].padStart(3, '0');
+
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
+            const tagPattern = /^R4L5-v(\d{3})\.(\d{3})\.(\d{3})$/;
+            const installerReleases = releases
+              .map(r => ({ r, m: r.tag_name.match(tagPattern) }))
+              .filter(x => x.m)
+              .map(x => ({
+                tag: x.r.tag_name,
+                ruby: x.m[1], gems: x.m[2], ci: parseInt(x.m[3], 10),
+              }))
+              .sort((a, b) => a.ruby.localeCompare(b.ruby) || a.gems.localeCompare(b.gems) || (a.ci - b.ci));
+
+            let proposedTag, rationale;
+
+            if (installerReleases.length === 0) {
+              // Bootstrap: no prior R4L5-v release to diff against. This exact
+              // value was agreed by hand (2026-07-09) -- yesterday's real,
+              // hardware-validated build counts as CI generation 1 even though
+              // it was never formally tagged, so the first real tag starts at
+              // CI generation 2, not 1. Not derivable from git history; stated
+              // here as documented fact.
+              const bootstrapCi = '002';
+              proposedTag = `R4L5-v${rubyField}.${gemsField}.${bootstrapCi}`;
+              rationale = 'No prior R4L5-v release exists yet. Proposing the documented bootstrap value ' +
+                '(CI starts at 002, not 001 -- see docs/PUNCHLIST-remaining-work.md\'s versioning section for why) ' +
+                'rather than deriving it, since there is nothing to diff against.';
+            } else {
+              const latest = installerReleases[installerReleases.length - 1];
+              let ciChanged = false;
+              try {
+                // Use the tag name itself as the compare base, not
+                // release.target_commitish -- that field is just the literal
+                // branch-name string passed at creation time (e.g. "main"),
+                // never resolved to a SHA, so it silently drifts to whatever
+                // main currently is on every run rather than staying pinned to
+                // release time. Confirmed empirically against every release
+                // in this repo: target_commitish reads "main" on all of them.
+                // A tag name is a real, immutable git ref and doesn't have
+                // this problem.
+                const cmp = await github.rest.repos.compareCommits({
+                  owner, repo, base: latest.tag, head: headSha,
+                });
+                const trackedPaths = new Set([
+                  'Ruby4Lich5-installer.iss',
+                  'fetch-lich.ps1',
+                  '.github/workflows/build-ruby4lich5-installer.yaml',
+                ]);
+                ciChanged = (cmp.data.files || []).some(f => trackedPaths.has(f.filename));
+              } catch (e) {
+                core.warning(`Could not compare against ${latest.tag}: ${e.message}. Assuming CI changed, to fail safe toward proposing a bump rather than silently proposing none.`);
+                ciChanged = true;
+              }
+
+              const rubyChanged = rubyField !== latest.ruby;
+              const gemsChanged = gemsField !== latest.gems;
+              const ciField = ciChanged ? String(latest.ci + 1).padStart(3, '0') : String(latest.ci).padStart(3, '0');
+
+              if (!rubyChanged && !gemsChanged && !ciChanged) {
+                proposedTag = null;
+                rationale = `No change detected against the latest installer release (${latest.tag}) -- ` +
+                  `Ruby, Gems, and the tracked installer files (Ruby4Lich5-installer.iss, fetch-lich.ps1, ` +
+                  `build-ruby4lich5-installer.yaml) all match. No version bump proposed.`;
+              } else {
+                proposedTag = `R4L5-v${rubyField}.${gemsField}.${ciField}`;
+                const reasons = [];
+                if (rubyChanged) reasons.push(`Ruby ${latest.ruby} -> ${rubyField} (ruby-series default changed)`);
+                if (gemsChanged) reasons.push(`Gems ${latest.gems} -> ${gemsField} (gem-release-tag default changed)`);
+                if (ciChanged) reasons.push(`CI ${latest.ci} -> ${parseInt(ciField, 10)} (installer/workflow files changed since ${latest.tag})`);
+                rationale = `Compared against the latest installer release (${latest.tag}):\n` +
+                  reasons.map(r => `- ${r}`).join('\n');
+              }
+            }
+
+            const body = proposedTag
+              ? `${MARKER}\n### Proposed next installer version\n\n**\`${proposedTag}\`**\n\n${rationale}\n\n` +
+                `Review and bump \`installer-version\` in a real dispatch of \`build-ruby4lich5-installer.yaml\` ` +
+                `to \`${proposedTag.replace('R4L5-v', '')}\` when this PR is ready to ship as a release. ` +
+                `This is a proposal only -- nothing is assigned automatically.`
+              : `${MARKER}\n### Proposed next installer version\n\n${rationale}`;
+
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: prNumber, per_page: 100 });
+            const existing = comments.find(c => c.body && c.body.includes(MARKER));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: prNumber, body });
+            }
