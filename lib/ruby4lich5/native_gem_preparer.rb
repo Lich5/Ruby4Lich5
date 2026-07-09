@@ -7,6 +7,7 @@ require_relative 'patch_applier'
 require_relative 'patch_generator'
 require_relative 'vendoring_role_classifier'
 require_relative 'glib2_reachability'
+require_relative 'safe_token'
 
 module Ruby4Lich5
   # The Ruby decision layer's actual entry point for one build request:
@@ -170,9 +171,11 @@ module Ruby4Lich5
     #   heard of (a new RubyGems extension mechanism, or one simply not yet
     #   in {DEPENDENCY_CHECK_TASK}'s exemption) is never silently treated as
     #   "safe."
+    # @raise [ArgumentError] if +name+ is missing or contains unsafe characters
     # @raise [GemspecNormalizer::NormalizationError] if the gemspec can't be
     #   loaded at all
     def declared_extensions(name, gem_root)
+      SafeToken.validate!(name, 'gem name')
       path = File.join(gem_root, "#{name}.gemspec")
       spec = Gem::Specification.load(path)
 

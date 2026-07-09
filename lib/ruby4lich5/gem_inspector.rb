@@ -50,8 +50,8 @@ module Ruby4Lich5
     #   there means "this ABI has a precompiled binary," confirmed real
     #   2026-07-08 by reproducing the false positive directly.
     def abi_present?(ruby_abi)
-      nested = %r{^lib/#{Regexp.escape(@spec.name)}/#{Regexp.escape(ruby_abi)}/.+\.so\z}
-      flat = %r{^lib/#{Regexp.escape(ruby_abi)}/.+\.so\z}
+      nested = %r{\Alib/#{Regexp.escape(@spec.name)}/#{Regexp.escape(ruby_abi)}/.+\.so\z}
+      flat = %r{\Alib/#{Regexp.escape(ruby_abi)}/.+\.so\z}
       @spec.files.any? { |f| f.match?(nested) || f.match?(flat) }
     end
 
