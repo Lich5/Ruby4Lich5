@@ -134,6 +134,18 @@ jobs:
       # Single source of truth for the MSYS2/MinGW toolchain. The whole job
       # is keyed off this install via steps.msys2.outputs.msys2-location, so
       # there is no second pacman pass into a separate C:\msys64 root.
+      # pacman prints "warning: dependency cycle detected" for libwebp/libtiff
+      # and harfbuzz/freetype during this step -- confirmed real, longstanding,
+      # upstream MSYS2 package-metadata quirk (same exact libwebp/libtiff pair
+      # shows up across multiple real msys2/MSYS2-packages and msys2/MINGW-
+      # packages GitHub issues), not anything in this build. Non-fatal --
+      # pacman picks an install order anyway and every later step depending on
+      # these packages succeeds. Scoped entirely to this build machine's own
+      # package manager; the shipped product never runs pacman at all, it only
+      # ever receives already-compiled .dll files loaded via Windows' own PE
+      # loader -- a completely different mechanism with no shared failure
+      # mode. Investigated and confirmed benign 2026-07-09, not chased further
+      # (upstream MSYS2's own package graph, not ours to fix).
       - name: Install MSYS2 UCRT build surface
         id: msys2
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
@@ -702,6 +714,38 @@ jobs:
             }
           }
 
+          # Real dependency subset for a vendoring root that isn't glib2 --
+          # glib2 alone is load-bearing for the dynamically-loaded typelib/
+          # gdk-pixbuf-loader discovery earlier in this step (see the comment
+          # on $vendoringRoots below), so it keeps the full aggregate
+          # closure; every other root gets only its own real static-import
+          # chain, walked from its own primary DLL. Deliberately scoped to
+          # $knownDlls (the already-computed, already-vetted full closure)
+          # rather than re-running objdump against the filesystem -- the
+          # scoped result is always a subset of the already-proven-correct
+          # full set, never a novel/unverified DLL. Real fix, 2026-07-09 --
+          # see docs/PUNCHLIST-remaining-work.md for the measured 43MB
+          # duplication this addresses.
+          function Get-ScopedDllClosure([string] $rootDllPath, [hashtable] $knownDlls) {
+            $scoped = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            $queue = [System.Collections.Generic.Queue[string]]::new()
+            $queue.Enqueue((Split-Path $rootDllPath -Leaf))
+            while ($queue.Count -gt 0) {
+              $current = $queue.Dequeue()
+              if ($scoped.Contains($current)) {
+                continue
+              }
+              if (-not $knownDlls.ContainsKey($current)) {
+                continue
+              }
+              [void] $scoped.Add($current)
+              foreach ($dependency in (Get-DllDependencies $knownDlls[$current])) {
+                $queue.Enqueue($dependency)
+              }
+            }
+            return $scoped
+          }
+
           function Build-GemWithHarness([string] $gemName) {
             Write-Host "::group::Build $gemName"
             Push-Location $harnessRoot
@@ -784,17 +828,41 @@ jobs:
           # not a hardcoded list -- for the real GTK3 stack this resolves to
           # exactly glib2+cairo today (VendoringRoleClassifier's own spec
           # locks that in against the real closure shape), same two gems
-          # this loop named directly before. Every root still gets the same
-          # full $runtimeDlls closure copied in, unchanged from today's
-          # behavior -- scoping each root down to only its own real subset
-          # (cairo's vendor/local/bin doesn't need the whole GNOME closure,
-          # just its own real dependency chain) is real, valuable follow-on
-          # work, deliberately not bundled into this change: it's a
-          # correctness-sensitive question of *what* gets vendored, not
-          # *which gems* are roots, and glib2 specifically is load-bearing
-          # for the dynamically-loaded typelib/gdk-pixbuf-loader discovery
-          # above in a way a naive per-gem static-import walk could silently
-          # miss.
+          # this loop named directly before.
+          #
+          # glib2 keeps the full aggregate $runtimeDlls closure -- it's
+          # load-bearing for the dynamically-loaded typelib/gdk-pixbuf-loader
+          # discovery above in a way a naive per-gem static-import walk could
+          # silently miss (those DLLs are loaded by name at runtime, not
+          # linked at compile time, so they'd never show up in any gem's own
+          # static import table). Every other root gets Get-ScopedDllClosure's
+          # real static-import subset instead of the full set -- confirmed
+          # real, measured ~43MB duplication this removes (see
+          # docs/PUNCHLIST-remaining-work.md). Deliberately not "glib2's
+          # closure minus cairo's" or any other clever derivation -- cairo
+          # must remain independently resolvable even if glib2 never loads
+          # first in a given process (a cairo-only usage without the rest of
+          # the GTK stack is a real, supported scenario), so its own closure
+          # is walked from its own real DLL, not inferred from glib2's.
+          #
+          # Verified against real MSYS2 binaries (real objdump, not
+          # assumed): libcairo-gobject-2.dll ships as a *sibling* DLL inside
+          # the same cairo package, not a dependency reachable by walking
+          # libcairo-2.dll's own import table (confirmed: the reverse is
+          # true -- libcairo-gobject-2.dll imports libcairo-2.dll, not the
+          # other way around). cairo's own scoped closure here does not
+          # include it. That's safe only because glib2's unchanged full
+          # closure already picks it up via the existing wildcard
+          # 'libcairo*.dll' glob seed further up this step, and the real
+          # cairo-gobject patch (patches/cairo-gobject/require-abi.rb)
+          # registers no search path of its own -- it depends entirely on
+          # cairo and glib2 having already prepended theirs, with glib2
+          # guaranteed to load first. If glib2 is ever removed from this
+          # vendoring-root set, this stops being true and needs
+          # re-verifying. libcairo-script-interpreter-2.dll (the other
+          # sibling in the same package) is unreferenced anywhere in
+          # ruby-gnome's own source -- confirmed via GitHub code search,
+          # not assumed -- and needs no coverage at all.
           $vendoringRoots = @(
             (Get-Content $env:NATIVE_GEMS_PLAN -Raw | ConvertFrom-Json) |
               Where-Object { $_.vendoring_role -eq 'vendoring_root' } |
@@ -814,7 +882,38 @@ jobs:
             }
             $binTarget = Join-Path $targetRoot 'vendor\local\bin'
             New-Item -ItemType Directory -Path $binTarget -Force | Out-Null
-            $dllNames = @($runtimeDlls.Keys | Sort-Object)
+
+            if ($target -eq 'glib2') {
+              $dllNames = @($runtimeDlls.Keys | Sort-Object)
+            } else {
+              # Exact, not "first alphabetical match" -- real bug, found and
+              # fixed 2026-07-09: lib$target*.dll alone also matches sibling
+              # DLLs shipped in the same package (cairo's own package ships
+              # libcairo-gobject-2.dll and libcairo-script-interpreter-2.dll
+              # alongside libcairo-2.dll, confirmed directly). Relying on
+              # Select-Object -First 1's incidental ordering to land on the
+              # right one isn't a real guarantee. MSYS2's own real naming
+              # convention for a primary shared-library DLL is
+              # lib<name>-<digits...>.dll -- a version number immediately
+              # after the hyphen -- which a sibling like "-gobject-" or
+              # "-script-interpreter-" never matches, so this anchors on
+              # that instead of enumeration order.
+              $rootDllPattern = "^lib$([regex]::Escape($target))-\d.*\.dll$"
+              $rootDllFile = Get-ChildItem -Path $prefixBin -Filter "lib$target*.dll" -File |
+                Where-Object { $_.Name -match $rootDllPattern } |
+                Sort-Object Name |
+                Select-Object -First 1
+              if (-not $rootDllFile) {
+                Write-Error "Vendoring failed: could not find $target's own primary DLL (pattern $rootDllPattern) in $prefixBin to scope its closure."
+                exit 1
+              }
+              $dllNames = @((Get-ScopedDllClosure $rootDllFile.FullName $runtimeDlls) | Sort-Object)
+              if ($dllNames.Count -eq 0) {
+                Write-Error "Vendoring failed: scoped closure for $target (from $($rootDllFile.Name)) came back empty."
+                exit 1
+              }
+            }
+
             foreach ($dll in $dllNames) {
               Copy-Item $runtimeDlls[$dll] $binTarget -Force
             }
@@ -1227,6 +1326,20 @@ jobs:
             exit $LASTEXITCODE
           }
 
+          # This require set prints "Unsupported PangoCairo function:
+          # layout_path_for_components" to stderr -- confirmed real, deliberate
+          # upstream ruby-gnome behavior, not a failure (verified directly
+          # against ruby-gnome's own source, pango/lib/pango/cairo-loader.rb,
+          # PangoCairo::Loader#load_function_info): it walks every function the
+          # real PangoCairo GIR typelib exports and auto-generates a Ruby
+          # method for names matching known prefixes (context_get_*, create_*,
+          # names ending in _path, etc.); anything that doesn't match just gets
+          # a warn() and is skipped, not raised. layout_path_for_components has
+          # _for_components appended after _path, so it doesn't match the
+          # "ends in _path" pattern and falls through. The C function itself
+          # works fine; nothing in Lich or this project calls it. Investigated
+          # and confirmed benign 2026-07-09, not chased further (upstream
+          # ruby-gnome's own binding-generation logic, not ours to patch).
           & $rubyExe.FullName -e "require 'sqlite3'; require 'ox'; require 'ffi'; require 'ascii_charts'; require 'kramdown'; require 'webrick'; require 'redis'; require 'sequel'; require 'set'; require 'terminal-table'; require 'tzinfo'; require 'curses'; require 'os'; require 'cairo'; require 'gtk3'; Gtk.init; puts 'Clean packaged Ruby4/Lich runtime smoke OK'"
           if ($LASTEXITCODE -ne 0) {
             Write-Error "Clean packaged smoke failed: runtime require set failed."
@@ -1284,9 +1397,22 @@ jobs:
     # aren't blocked by this -- only the publish step itself needs to be
     # serialized. Queues rather than cancels: cancel-in-progress would
     # interrupt a clobber mid-upload, reintroducing the exact non-atomicity
-    # this exists to prevent. Real finding, fixed 2026-07-09.
+    # this exists to prevent.
+    #
+    # Deliberately NOT scoped by ${{ github.ref }} -- real bug, found and
+    # fixed 2026-07-09: the release tags being clobbered (R4L5-<gem>-
+    # <version>-<platform>, R4L5-gem-bundle-<platform>) are computed purely
+    # from gem name/version/platform, never from which branch triggered the
+    # build. A ref-scoped group only serializes dispatches from the *same*
+    # branch -- a dispatch from main and a dispatch from any other branch
+    # would still get different groups and race on the exact same tags,
+    # defeating the whole point of this block. Fixed group name instead,
+    # global across every branch. Platform included for when a second
+    # platform lane exists someday; hardcoded rather than read from env,
+    # since concurrency `group:` expressions don't have access to a job's
+    # own env context.
     concurrency:
-      group: publish-ruby4-bundled-gems-suite-${{ github.ref }}
+      group: publish-ruby4-bundled-gems-suite-x64-mingw-ucrt
       cancel-in-progress: false
 
     permissions:
@@ -1363,8 +1489,22 @@ jobs:
             Copy-Item $gemFile.FullName $publishPath -Force
             $localSha = (Get-FileHash -Path $publishPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
-            gh release view $tag --json tagName *> $null
-            if ($LASTEXITCODE -eq 0) {
+            # try/catch, not *> $null -- GitHub Actions' shell: powershell runs
+            # with $ErrorActionPreference = 'Stop', which promotes a native
+            # command's stderr output (gh's own "release not found" here, the
+            # normal/expected outcome on first publish) to a terminating
+            # exception immediately, before $LASTEXITCODE is ever checked.
+            # Stream redirection doesn't prevent that promotion; only
+            # try/catch does. Real bug, found live 2026-07-09 -- local pwsh
+            # syntax validation couldn't have caught this, it's a runtime
+            # semantic difference, not a parse error.
+            $tagExists = $true
+            try {
+              gh release view $tag --json tagName | Out-Null
+            } catch {
+              $tagExists = $false
+            }
+            if ($tagExists) {
               gh release upload $tag $publishPath --clobber
               if ($LASTEXITCODE -ne 0) {
                 Write-Error "Publish failed: gh release upload --clobber failed for $tag."
@@ -1384,7 +1524,25 @@ jobs:
               }
             }
 
-            $remoteDigest = (gh release view $tag --json assets --jq ".assets[] | select(.name == ""$publishName"") | .digest") -replace '^sha256:', ''
+            # Retries only on an empty digest, not on a populated-but-different
+            # one -- real gap, found and fixed 2026-07-09: GitHub's asset
+            # digest metadata isn't guaranteed to be populated the instant an
+            # upload call returns, so reading it back immediately could come
+            # back empty and get misread as a mismatch when the upload
+            # actually succeeded. A genuine mismatch (both values present,
+            # disagreeing) still fails immediately below, not retried away.
+            $remoteDigest = $null
+            for ($digestAttempt = 1; $digestAttempt -le 5; $digestAttempt++) {
+              $remoteDigest = (gh release view $tag --json assets --jq ".assets[] | select(.name == ""$publishName"") | .digest") -replace '^sha256:', ''
+              if (-not [string]::IsNullOrWhiteSpace($remoteDigest)) {
+                break
+              }
+              Start-Sleep -Seconds 2
+            }
+            if ([string]::IsNullOrWhiteSpace($remoteDigest)) {
+              Write-Error "Publish failed: $tag's $publishName asset had no digest after 5 attempts -- GitHub's asset metadata may not have finished processing."
+              exit 1
+            }
             if ($remoteDigest -ne $localSha) {
               Write-Error "Publish failed: digest mismatch for $tag -- local $localSha, remote $remoteDigest. Upload may be corrupted -- gh release upload --clobber is delete-then-upload, not atomic."
               exit 1
@@ -1426,11 +1584,26 @@ jobs:
           }
           $localSha = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
-          gh release view $liveTag --json tagName *> $null
-          if ($LASTEXITCODE -eq 0) {
+          # try/catch, not *> $null -- see the same real fix and reasoning in
+          # "Publish native gems" above (GitHub Actions' shell: powershell
+          # promotes a native command's stderr to a terminating exception
+          # under $ErrorActionPreference = 'Stop', which redirection alone
+          # doesn't prevent).
+          $liveTagExists = $true
+          try {
+            gh release view $liveTag --json tagName | Out-Null
+          } catch {
+            $liveTagExists = $false
+          }
+          if ($liveTagExists) {
             $tag = $candidateTag
-            gh release view $tag --json tagName *> $null
-            if ($LASTEXITCODE -eq 0) {
+            $candidateTagExists = $true
+            try {
+              gh release view $tag --json tagName | Out-Null
+            } catch {
+              $candidateTagExists = $false
+            }
+            if ($candidateTagExists) {
               gh release upload $tag $zipPath --clobber
               if ($LASTEXITCODE -ne 0) {
                 Write-Error "Publish failed: gh release upload --clobber failed for $tag."
@@ -1459,7 +1632,19 @@ jobs:
             }
           }
 
-          $remoteDigest = (gh release view $tag --json assets --jq ".assets[] | select(.name == ""$zipName"") | .digest") -replace '^sha256:', ''
+          # Same retry-on-empty-only fix as the individual-gem publish step above.
+          $remoteDigest = $null
+          for ($digestAttempt = 1; $digestAttempt -le 5; $digestAttempt++) {
+            $remoteDigest = (gh release view $tag --json assets --jq ".assets[] | select(.name == ""$zipName"") | .digest") -replace '^sha256:', ''
+            if (-not [string]::IsNullOrWhiteSpace($remoteDigest)) {
+              break
+            }
+            Start-Sleep -Seconds 2
+          }
+          if ([string]::IsNullOrWhiteSpace($remoteDigest)) {
+            Write-Error "Publish failed: $tag's $zipName asset had no digest after 5 attempts -- GitHub's asset metadata may not have finished processing."
+            exit 1
+          }
           if ($remoteDigest -ne $localSha) {
             Write-Error "Publish failed: digest mismatch for $tag -- local $localSha, remote $remoteDigest. Upload may be corrupted -- gh release upload --clobber is delete-then-upload, not atomic."
             exit 1
