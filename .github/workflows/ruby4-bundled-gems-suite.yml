@@ -1411,9 +1411,19 @@ jobs:
     # platform lane exists someday; hardcoded rather than read from env,
     # since concurrency `group:` expressions don't have access to a job's
     # own env context.
+    #
+    # queue: max -- real gap, found and fixed 2026-07-09: without it, a
+    # concurrency group can hold only one in-progress run plus one pending
+    # run; a third dispatch arriving while both slots are occupied silently
+    # cancels and replaces the pending one, dropping a queued publish with
+    # no error. queue: max raises that to up to 100 queued runs, FIFO by
+    # wait-start time -- confirmed against GitHub's own docs/changelog
+    # (feature shipped 2026-05-07), not assumed. Only valid alongside
+    # cancel-in-progress: false (already the case here).
     concurrency:
       group: publish-ruby4-bundled-gems-suite-x64-mingw-ucrt
       cancel-in-progress: false
+      queue: max
 
     permissions:
       contents: write
