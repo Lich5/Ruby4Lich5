@@ -1499,32 +1499,37 @@ jobs:
             Copy-Item $gemFile.FullName $publishPath -Force
             $localSha = (Get-FileHash -Path $publishPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
-            # try/catch, not *> $null -- GitHub Actions' shell: powershell runs
-            # with $ErrorActionPreference = 'Stop', which promotes a native
-            # command's stderr output (gh's own "release not found" here, the
-            # normal/expected outcome on first publish) to a terminating
-            # exception immediately, before $LASTEXITCODE is ever checked.
-            # try/catch alone isn't sufficient either -- real bug, found live
-            # 2026-07-09 on a second run: that promotion turned out to be
-            # inconsistent, not guaranteed. The first live run had it throw
-            # (caught cleanly); this run it did NOT throw at all for the
-            # exact same "release not found" condition -- the try block
-            # completed without an exception, leaving $tagExists at
-            # whatever its default was, which was wrong. The only actually
-            # reliable signal is $LASTEXITCODE, checked explicitly, whether
-            # or not an exception fired -- so default to false and only
-            # flip true on a confirmed zero exit, with catch kept purely as
-            # a backstop for whichever runs the promotion does happen on.
-            # *> $null (all streams) instead of a stdout-only pipe, since
-            # piping to Out-Null never redirected the native command's own
-            # stderr text ("release not found" still showed up in every log
-            # regardless).
+            # $LASTEXITCODE alone can't tell "doesn't exist" apart from an
+            # auth/network/rate-limit failure -- both exit 1 -- real gap,
+            # found and fixed 2026-07-09: confirmed directly, a genuine
+            # missing release prints exactly "release not found", a bad
+            # token prints "non-200 OK status code: 401 Unauthorized...";
+            # exit code is 1 either way. Treating any non-zero exit as
+            # "absent" would silently attempt gh release create on top of a
+            # transient failure, replacing a clear root cause with a
+            # confusing downstream error. Only the exact "release not
+            # found" text is treated as absence; anything else fails
+            # loudly here instead. try/catch stays as a backstop since
+            # GitHub Actions' shell: powershell (EAP = Stop) promotes a
+            # native command's stderr to a terminating exception
+            # inconsistently (confirmed across two live runs: threw once,
+            # didn't throw for the identical condition the next time) --
+            # both paths funnel into the same text check below.
             $tagExists = $false
+            $viewFailureText = ''
             try {
-              gh release view $tag --json tagName *> $null
-              $tagExists = ($LASTEXITCODE -eq 0)
+              $viewResult = gh release view $tag --json tagName 2>&1
+              if ($LASTEXITCODE -eq 0) {
+                $tagExists = $true
+              } else {
+                $viewFailureText = "$viewResult"
+              }
             } catch {
-              $tagExists = $false
+              $viewFailureText = "$_"
+            }
+            if (-not $tagExists -and $viewFailureText -notmatch 'release not found') {
+              Write-Error "Publish failed: gh release view for $tag failed unexpectedly (not a plain not-found) -- $viewFailureText"
+              exit 1
             }
             if ($tagExists) {
               gh release upload $tag $publishPath --clobber
@@ -1606,26 +1611,45 @@ jobs:
           }
           $localSha = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
-          # Default false, flip true only on a confirmed zero exit, *> $null
-          # for all streams -- see the same real fix and reasoning in
-          # "Publish native gems" above (the exception-promotion this try/
-          # catch guards against turned out to be inconsistent across runs;
-          # $LASTEXITCODE, checked explicitly, is the only reliable signal).
+          # Same real fix as "Publish native gems" above, same reasoning:
+          # $LASTEXITCODE alone can't distinguish "doesn't exist" (gh's
+          # exact "release not found" text) from an auth/network/rate-limit
+          # failure -- both exit 1. Only the exact not-found text is
+          # treated as absence; anything else fails loudly instead of
+          # silently falling through to gh release create.
           $liveTagExists = $false
+          $liveTagFailureText = ''
           try {
-            gh release view $liveTag --json tagName *> $null
-            $liveTagExists = ($LASTEXITCODE -eq 0)
+            $liveTagViewResult = gh release view $liveTag --json tagName 2>&1
+            if ($LASTEXITCODE -eq 0) {
+              $liveTagExists = $true
+            } else {
+              $liveTagFailureText = "$liveTagViewResult"
+            }
           } catch {
-            $liveTagExists = $false
+            $liveTagFailureText = "$_"
+          }
+          if (-not $liveTagExists -and $liveTagFailureText -notmatch 'release not found') {
+            Write-Error "Publish failed: gh release view for $liveTag failed unexpectedly (not a plain not-found) -- $liveTagFailureText"
+            exit 1
           }
           if ($liveTagExists) {
             $tag = $candidateTag
             $candidateTagExists = $false
+            $candidateTagFailureText = ''
             try {
-              gh release view $tag --json tagName *> $null
-              $candidateTagExists = ($LASTEXITCODE -eq 0)
+              $candidateTagViewResult = gh release view $tag --json tagName 2>&1
+              if ($LASTEXITCODE -eq 0) {
+                $candidateTagExists = $true
+              } else {
+                $candidateTagFailureText = "$candidateTagViewResult"
+              }
             } catch {
-              $candidateTagExists = $false
+              $candidateTagFailureText = "$_"
+            }
+            if (-not $candidateTagExists -and $candidateTagFailureText -notmatch 'release not found') {
+              Write-Error "Publish failed: gh release view for $tag failed unexpectedly (not a plain not-found) -- $candidateTagFailureText"
+              exit 1
             }
             if ($candidateTagExists) {
               gh release upload $tag $zipPath --clobber
