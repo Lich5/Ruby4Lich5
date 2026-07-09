@@ -78,11 +78,11 @@ RSpec.describe Ruby4Lich5::GemInspector do
   end
 
   describe '#abi_present?' do
-    context 'when the package bundles a binary for the requested ABI' do
+    context 'the nested convention, lib/<gem_name>/<abi>/ -- real shape, sqlite3 2.9.5' do
       it 'returns true' do
         path = build_fixture_gem(
           name: 'fatgemfixture',
-          extra_files: ['lib/fatgemfixture/4.0/fatgemfixture.bundle', 'lib/fatgemfixture/3.4/fatgemfixture.bundle']
+          extra_files: ['lib/fatgemfixture/4.0/fatgemfixture_native.so', 'lib/fatgemfixture/3.4/fatgemfixture_native.so']
         )
 
         expect(described_class.new(path).abi_present?('4.0')).to be(true)
@@ -93,10 +93,54 @@ RSpec.describe Ruby4Lich5::GemInspector do
       it 'returns false' do
         path = build_fixture_gem(
           name: 'fatgemfixture',
-          extra_files: ['lib/fatgemfixture/3.4/fatgemfixture.bundle']
+          extra_files: ['lib/fatgemfixture/3.4/fatgemfixture_native.so']
         )
 
         expect(described_class.new(path).abi_present?('4.1')).to be(false)
+      end
+    end
+
+    context 'an ABI-named directory that holds only a pure-Ruby file, no compiled binary -- real false positive found 2026-07-08' do
+      it 'returns false -- a lib/<abi>/ directory alone is not proof of a precompiled binary' do
+        path = build_fixture_gem(
+          name: 'fatgemfixture',
+          extra_files: ['lib/fatgemfixture/4.0/compat.rb']
+        )
+
+        expect(described_class.new(path).abi_present?('4.0')).to be(false)
+      end
+    end
+
+    context 'the flat convention, lib/<abi>/, gem name omitted -- real shape, ffi 1.17.4' do
+      it 'returns true -- the real false negative found 2026-07-08: ffi genuinely bundles ' \
+         'Ruby 4.0 support (confirmed by downloading and unpacking the real gem), but the ' \
+         'nested-only pattern sent it down the native_self_contained path anyway' do
+        path = build_fixture_gem(
+          name: 'ffi',
+          extra_files: ['lib/4.0/ffi_c.so', 'lib/3.4/ffi_c.so']
+        )
+
+        expect(described_class.new(path).abi_present?('4.0')).to be(true)
+      end
+
+      it 'still returns false for an ABI the flat convention does not bundle either' do
+        path = build_fixture_gem(name: 'ffi', extra_files: ['lib/3.4/ffi_c.so'])
+
+        expect(described_class.new(path).abi_present?('4.1')).to be(false)
+      end
+    end
+
+    context 'both real conventions checked together, in the same suite, neither shadowing the other' do
+      it 'recognizes a nested-convention gem even though a flat-convention gem also exists in the world' do
+        nested_path = build_fixture_gem(name: 'sqlite3', extra_files: ['lib/sqlite3/4.0/sqlite3_native.so'])
+
+        expect(described_class.new(nested_path).abi_present?('4.0')).to be(true)
+      end
+
+      it 'recognizes a flat-convention gem even though a nested-convention gem also exists in the world' do
+        flat_path = build_fixture_gem(name: 'ffi', extra_files: ['lib/4.0/ffi_c.so'])
+
+        expect(described_class.new(flat_path).abi_present?('4.0')).to be(true)
       end
     end
   end

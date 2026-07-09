@@ -92,6 +92,19 @@ module Ruby4Lich5
       end
     end
 
+    # @param gem_name [String]
+    # @return [Boolean] whether any curated patch file exists for this gem
+    #   at all -- for a caller (e.g. auto-generating a missing patch) that
+    #   needs to know "is there already something here" without applying
+    #   anything or duplicating {#patch_files_for}'s own directory lookup
+    # @raise [ArgumentError] if +gem_name+ is missing or contains unsafe
+    #   characters
+    def patches_exist_for?(gem_name)
+      SafeToken.validate!(gem_name, 'gem name')
+
+      !patch_files_for(gem_name).empty?
+    end
+
     private
 
     # @return [Array<String>] absolute paths, sorted by filename

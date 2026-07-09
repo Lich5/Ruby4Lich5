@@ -604,4 +604,27 @@ RSpec.describe Ruby4Lich5::PatchApplier do
       end
     end
   end
+
+  describe '#patches_exist_for?' do
+    it 'is false when the gem has no patches directory at all' do
+      expect(applier.patches_exist_for?('unpatched-gem')).to be false
+    end
+
+    it 'is false when the gem has a patches directory but no .rb files in it' do
+      dir = File.join(@patches_root, 'empty-dir-gem')
+      FileUtils.mkdir_p(dir)
+
+      expect(applier.patches_exist_for?('empty-dir-gem')).to be false
+    end
+
+    it 'is true when at least one patch file exists' do
+      write_patch(@patches_root, 'patched-gem', 'some-fix', "{ file: 'lib/x.rb', marker: 'm', content: 'x' }")
+
+      expect(applier.patches_exist_for?('patched-gem')).to be true
+    end
+
+    it 'rejects an unsafe gem_name the same way #apply_all does' do
+      expect { applier.patches_exist_for?('../lib/ruby4lich5') }.to raise_error(ArgumentError, /disallowed characters/)
+    end
+  end
 end
