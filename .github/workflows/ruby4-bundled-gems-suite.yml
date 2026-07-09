@@ -1273,6 +1273,22 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
 
+    # gh release upload --clobber is delete-then-upload, not atomic (already
+    # true and documented below) -- two workflow_dispatch runs publishing
+    # concurrently can race on the same tag (guaranteed for the bundle tag,
+    # which isn't parameterized by build inputs at all; possible for an
+    # individual gem tag whenever two runs happen to produce the same
+    # upstream version), corrupting an in-flight upload or failing the
+    # digest check with a mismatch that isn't actually a bug. Job-scoped
+    # (not workflow-scoped) so a second run's expensive build+smoke stages
+    # aren't blocked by this -- only the publish step itself needs to be
+    # serialized. Queues rather than cancels: cancel-in-progress would
+    # interrupt a clobber mid-upload, reintroducing the exact non-atomicity
+    # this exists to prevent. Real finding, fixed 2026-07-09.
+    concurrency:
+      group: publish-ruby4-bundled-gems-suite-${{ github.ref }}
+      cancel-in-progress: false
+
     permissions:
       contents: write
 
