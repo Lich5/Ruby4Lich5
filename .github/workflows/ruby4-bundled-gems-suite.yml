@@ -1115,6 +1115,13 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
 
+    # Deliberately no write permissions and no GH_TOKEN in this job -- it
+    # installs and requires freshly built/upstream gem code (the smoke test
+    # below), which is untrusted code execution. A write-capable release
+    # token sitting in the environment during that step would be reachable
+    # by anything malicious a compromised gem managed to run. Publishing
+    # happens in a separate job below, downstream of a passing smoke test,
+    # with its own narrowly-scoped token -- real finding, fixed 2026-07-09.
     env:
       RUBY_INSTALLER_VERSION: ${{ inputs.ruby-installer-version }}
       PKG_DIR: ${{ github.workspace }}\pkg
@@ -1253,3 +1260,208 @@ jobs:
           path: dist/pkg/*
           retention-days: 90
           if-no-files-found: error
+
+  # Separate job, downstream of a passing smoke test, so the write-capable
+  # release token never coexists with untrusted gem code execution (the smoke
+  # job above installs/requires freshly built and upstream gem code -- real
+  # finding, fixed 2026-07-09: contents: write and GH_TOKEN used to sit in
+  # that same job's environment). Downloads the same staged artifact the
+  # smoke job already produced rather than re-deriving anything.
+  publish_ruby4_bundled_gems_suite:
+    name: Publish Ruby4 bundled gems and gem bundle (windows-ucrt64)
+    needs: smoke_ruby4_bundled_gems_suite
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    # gh release upload --clobber is delete-then-upload, not atomic (already
+    # true and documented below) -- two workflow_dispatch runs publishing
+    # concurrently can race on the same tag (guaranteed for the bundle tag,
+    # which isn't parameterized by build inputs at all; possible for an
+    # individual gem tag whenever two runs happen to produce the same
+    # upstream version), corrupting an in-flight upload or failing the
+    # digest check with a mismatch that isn't actually a bug. Job-scoped
+    # (not workflow-scoped) so a second run's expensive build+smoke stages
+    # aren't blocked by this -- only the publish step itself needs to be
+    # serialized. Queues rather than cancels: cancel-in-progress would
+    # interrupt a clobber mid-upload, reintroducing the exact non-atomicity
+    # this exists to prevent. Real finding, fixed 2026-07-09.
+    concurrency:
+      group: publish-ruby4-bundled-gems-suite-${{ github.ref }}
+      cancel-in-progress: false
+
+    permissions:
+      contents: write
+
+    env:
+      GEM_PLATFORM: x64-mingw-ucrt
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      NATIVE_RUNTIME_GEMS: ${{ inputs.native-runtime-gems }}
+
+    steps:
+      - name: Download staged runtime gem bundle
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: ruby4-bundled-gems-windows-ucrt64
+          path: dist/pkg
+
+      # Publishes only after the clean-install smoke test already passed --
+      # never a gem that merely compiled. Per docs/PUNCHLIST-remaining-work.md's
+      # locked naming convention: one current artifact per gem,
+      # R4L5-<name>-<upstream-version>-<platform>, overwritten in place
+      # (gh release upload --clobber) rather than an incrementing vNNN. No
+      # draft/review gate here deliberately -- these are the "current,
+      # smoke-tested" tier; the real gate on whether a given build is
+      # *authoritative* is the not-yet-built manifest's own PR-gated
+      # promotion (Doug's call, 2026-07-09), not a second gate duplicated
+      # here. The bundle step below is different -- it's the one artifact the
+      # installer actually consumes, so it keeps a human draft/promote step,
+      # same as the installer release itself.
+      #
+      # Asset filenames carry the R4L5- prefix too, not just the release tag
+      # (real finding, fixed 2026-07-09) -- the built file on disk is still
+      # plain RubyGems naming (glib2-4.3.6-x64-mingw-ucrt.gem), copied to a
+      # renamed path before upload so what a consumer actually downloads
+      # matches the locked convention exactly.
+      - name: Publish native gems (R4L5-<name>-<upstream-version>-<platform>)
+        shell: powershell
+        run: |
+          $pkgDir = Join-Path $env:GITHUB_WORKSPACE 'dist\pkg'
+          $platform = $env:GEM_PLATFORM
+          $sha = $env:GITHUB_SHA
+          $escapedPlatform = [regex]::Escape($platform)
+
+          # Same fixed 10-gem GTK3-stack list already used twice elsewhere in this
+          # file (the drift-check guard, the rebuild-after-vendoring step) -- not
+          # a new abstraction, the existing convention.
+          $gtk3StackGems = @('glib2', 'gobject-introspection', 'gio2', 'cairo', 'cairo-gobject', 'pango', 'gdk_pixbuf2', 'atk', 'gdk3', 'gtk3')
+          $nativeRuntimeGems = @(
+            ($env:NATIVE_RUNTIME_GEMS -split '[,\s]+') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          )
+          $nativeGemNames = @($gtk3StackGems + $nativeRuntimeGems | Sort-Object -Unique)
+
+          foreach ($gemName in $nativeGemNames) {
+            $escaped = [regex]::Escape($gemName)
+            $pattern = "^$escaped-(?<version>\d[\w.]*)-$escapedPlatform\.gem$"
+            $gemFile = Get-ChildItem -Path $pkgDir -Filter "$gemName-*$platform.gem" -File |
+              Where-Object { $_.Name -match $pattern } |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 1
+            if (-not $gemFile) {
+              Write-Error "Publish failed: no built .gem file found for native gem $gemName (pattern $pattern) in $pkgDir."
+              exit 1
+            }
+            $version = [regex]::Match($gemFile.Name, $pattern).Groups['version'].Value
+            if ([string]::IsNullOrWhiteSpace($version)) {
+              Write-Error "Publish failed: could not parse an upstream version out of $($gemFile.Name)."
+              exit 1
+            }
+
+            $tag = "R4L5-$gemName-$version-$platform"
+            $publishName = "$tag.gem"
+            $publishPath = Join-Path $env:RUNNER_TEMP $publishName
+            Copy-Item $gemFile.FullName $publishPath -Force
+            $localSha = (Get-FileHash -Path $publishPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
+            gh release view $tag --json tagName *> $null
+            if ($LASTEXITCODE -eq 0) {
+              gh release upload $tag $publishPath --clobber
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "Publish failed: gh release upload --clobber failed for $tag."
+                exit $LASTEXITCODE
+              }
+              gh release edit $tag --target $sha
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "Publish failed: could not update target commitish for $tag."
+                exit $LASTEXITCODE
+              }
+            } else {
+              $notes = "Built by Ruby4Lich5, commit $sha. The R4L5- prefix signals this gem was compiled/patched/vendored (or, for a pass-through gem, vetted and re-hosted as-is) by this factory -- see docs/PUNCHLIST-remaining-work.md, 'Gem/bundle naming convention -- LOCKED 2026-07-09'. This tag is a single current artifact, overwritten in place on rebuild, not an incrementing version -- verify by SHA-256 digest, not by trusting the tag alone."
+              gh release create $tag $publishPath --title "$gemName $version ($platform)" --notes $notes --target $sha
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "Publish failed: gh release create failed for $tag."
+                exit $LASTEXITCODE
+              }
+            }
+
+            $remoteDigest = (gh release view $tag --json assets --jq ".assets[] | select(.name == ""$publishName"") | .digest") -replace '^sha256:', ''
+            if ($remoteDigest -ne $localSha) {
+              Write-Error "Publish failed: digest mismatch for $tag -- local $localSha, remote $remoteDigest. Upload may be corrupted -- gh release upload --clobber is delete-then-upload, not atomic."
+              exit 1
+            }
+            Remove-Item $publishPath -Force
+            Write-Host "Published $tag (sha256:$localSha, commit $sha)"
+          }
+
+      # The bundle is the one artifact the installer actually consumes, so unlike
+      # individual gems above it keeps a human review/promote step -- same
+      # pattern already used for the installer release itself (Doug: "create me
+      # a DRAFT release... I'll review it, move it from draft and then snag it
+      # and test it"). First publish under the new naming scheme creates the
+      # live tag as a draft, same as the installer. Once that tag exists (already
+      # promoted by a prior run), this workflow never touches it again directly
+      # -- it publishes to a separate "candidate" prerelease instead, so a
+      # passing-but-unreviewed rebuild can never silently overwrite an
+      # already-reviewed live bundle. Promoting candidate -> live is a deliberate
+      # human action (gh release upload <live-tag> <file> --clobber), same
+      # command Doug already uses today, not automated here.
+      - name: Publish gem bundle (draft on first publish, candidate thereafter)
+        shell: powershell
+        run: |
+          $distPkg = Join-Path $env:GITHUB_WORKSPACE 'dist\pkg'
+          $platform = $env:GEM_PLATFORM
+          $sha = $env:GITHUB_SHA
+          $liveTag = "R4L5-gem-bundle-$platform"
+          $candidateTag = "R4L5-gem-bundle-$platform-candidate"
+          $zipName = "R4L5-gem-bundle-$platform.zip"
+          $zipPath = Join-Path $env:RUNNER_TEMP $zipName
+
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+          Compress-Archive -Path (Join-Path $distPkg '*') -DestinationPath $zipPath -CompressionLevel Optimal
+          if (-not (Test-Path $zipPath)) {
+            Write-Error "Publish failed: bundle zip $zipPath was not created."
+            exit 1
+          }
+          $localSha = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          gh release view $liveTag --json tagName *> $null
+          if ($LASTEXITCODE -eq 0) {
+            $tag = $candidateTag
+            gh release view $tag --json tagName *> $null
+            if ($LASTEXITCODE -eq 0) {
+              gh release upload $tag $zipPath --clobber
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "Publish failed: gh release upload --clobber failed for $tag."
+                exit $LASTEXITCODE
+              }
+              gh release edit $tag --target $sha
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "Publish failed: could not update target commitish for $tag."
+                exit $LASTEXITCODE
+              }
+            } else {
+              $notes = "Built by Ruby4Lich5, commit $sha. Candidate for promotion to $liveTag -- review and test before promoting (gh release upload $liveTag $zipName --clobber). Single current artifact, overwritten in place on rebuild -- verify by SHA-256 digest, not by trusting the tag alone."
+              gh release create $tag $zipPath --title "Gem bundle candidate ($platform)" --notes $notes --target $sha --prerelease
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "Publish failed: gh release create failed for $tag."
+                exit $LASTEXITCODE
+              }
+            }
+          } else {
+            $tag = $liveTag
+            $notes = "Built by Ruby4Lich5, commit $sha. Draft -- review and test before publishing (gh release edit $liveTag --draft=false). Single current artifact, overwritten in place on rebuild, not an incrementing version -- verify by SHA-256 digest, not by trusting the tag alone."
+            gh release create $tag $zipPath --title "Gem bundle ($platform)" --notes $notes --target $sha --draft
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Publish failed: gh release create failed for $tag."
+              exit $LASTEXITCODE
+            }
+          }
+
+          $remoteDigest = (gh release view $tag --json assets --jq ".assets[] | select(.name == ""$zipName"") | .digest") -replace '^sha256:', ''
+          if ($remoteDigest -ne $localSha) {
+            Write-Error "Publish failed: digest mismatch for $tag -- local $localSha, remote $remoteDigest. Upload may be corrupted -- gh release upload --clobber is delete-then-upload, not atomic."
+            exit 1
+          }
+          Write-Host "Published $tag (sha256:$localSha, commit $sha)"
