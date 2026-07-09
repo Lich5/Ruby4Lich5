@@ -30,12 +30,29 @@ module Ruby4Lich5
     end
 
     # @param ruby_abi [String] a Ruby ABI series, e.g. +"4.0"+
-    # @return [Boolean] true when this package bundles a precompiled binary
-    #   for the given ABI under the +lib/<gem_name>/<ruby_abi>/+ convention
-    #   (the fat-gem pattern, e.g. Nokogiri's own +lib/nokogiri/4.0/+)
+    # @return [Boolean] true when this package bundles a precompiled *native*
+    #   binary (a +.so+, RubyInstaller/MinGW's own +RbConfig::CONFIG['DLEXT']+
+    #   on the ucrt64 target this factory builds for -- not a Windows +.dll+)
+    #   for the given ABI, under either real fat-gem convention seen in the
+    #   wild: +lib/<gem_name>/<ruby_abi>/+ (e.g. sqlite3's own
+    #   +lib/sqlite3/4.0/sqlite3_native.so+, confirmed directly against the
+    #   real 2.9.5 package) or the flatter +lib/<ruby_abi>/+, gem-name
+    #   omitted (e.g. ffi's own +lib/4.0/ffi_c.so+, confirmed directly
+    #   against the real 1.17.4 package -- the gap that produced a false
+    #   +:native_self_contained+ classification for a gem upstream actually
+    #   already precompiles, found 2026-07-08). Checking only the nested
+    #   form was an unverified assumption, not a documented convention two
+    #   real, currently-classified gems don't even agree on.
+    #
+    #   Matching directory alone isn't enough -- a gem can legitimately ship
+    #   a plain +.rb+ file under an ABI-named directory (a per-version pure-Ruby
+    #   compat shim) that carries no compiled binary at all; only a +.so+
+    #   there means "this ABI has a precompiled binary," confirmed real
+    #   2026-07-08 by reproducing the false positive directly.
     def abi_present?(ruby_abi)
-      pattern = %r{^lib/#{Regexp.escape(@spec.name)}/#{Regexp.escape(ruby_abi)}/}
-      @spec.files.any? { |f| f.match?(pattern) }
+      nested = %r{\Alib/#{Regexp.escape(@spec.name)}/#{Regexp.escape(ruby_abi)}/.+\.so\z}
+      flat = %r{\Alib/#{Regexp.escape(ruby_abi)}/.+\.so\z}
+      @spec.files.any? { |f| f.match?(nested) || f.match?(flat) }
     end
 
     # @return [Boolean] true when the package includes its own +spec/+ or

@@ -15,6 +15,16 @@
 # gem -- full "any named gem" generalization of the compile step itself is separate,
 # larger, future work, not done in this pass.
 #
+# item 7a (2026-07-08): the DLL-vendoring *target list* (which gems get the discovered
+# runtime-DLL closure copied into their own vendor/local/bin) is now plan-driven --
+# read from each entry's vendoring_role (Ruby4Lich5::VendoringRoleClassifier, via
+# NativeGemPreparer) instead of a hardcoded @('glib2', 'cairo'). For the real GTK3 stack
+# this resolves to the same two gems as before -- deliberately behavior-preserving, not
+# a size optimization. Every root still gets the *same full* discovered DLL closure
+# copied in, same as before generalizing the list itself; scoping each root down to only
+# its own real dependency subset (cairo doesn't need the whole GNOME closure) is real,
+# separate follow-on work, not done here -- see docs/PUNCHLIST-remaining-work.md.
+#
 # upload-artifact/download-artifact bumped to v5 as part of this rewrite (matching the
 # checkout@v5 already used below) -- was v4 (Node 20; lich5-gtk3-gems never got the fix
 # elanthia-online/lich-5's own CI already had).
@@ -440,12 +450,23 @@ jobs:
           # step's resolution/download traffic all goes out over the real network, so wrap
           # the invocation itself rather than push retry logic into the library for what's
           # fundamentally a CI-transient-network concern, not a client-correctness one.
+          #
+          # Exit 2 from the script is its own documented "deterministic, do not retry"
+          # signal (IncompleteClosureError/UnbuildableGemError/NormalizationError/
+          # PatchError/GenerationError --
+          # see bin/prepare_native_gems.rb's own header comment) -- retrying one of those
+          # just re-runs the same check against the same already-downloaded bytes three
+          # times, burning the backoff window for a result that can't change. Only exit 1
+          # (ResolutionError, or anything unrecognized) is worth another attempt.
           $maxAttempts = 3
           $attempt = 0
           do {
             $attempt++
             & $env:RUBY_EXE $script gtk3 $env:RUBY_GNOME_VERSION $platform $rubyAbi $sourceRoot $planPath
             $exitCode = $LASTEXITCODE
+            if ($exitCode -eq 2) {
+              break
+            }
             if ($exitCode -ne 0 -and $attempt -lt $maxAttempts) {
               $backoffSeconds = 5 * $attempt
               Write-Host "::warning::Native gem preparation failed (exit $exitCode), attempt $attempt/$maxAttempts -- retrying in ${backoffSeconds}s (rubygems.org resolution/download can hit transient network errors)."
@@ -453,7 +474,8 @@ jobs:
             }
           } while ($exitCode -ne 0 -and $attempt -lt $maxAttempts)
           if ($exitCode -ne 0) {
-            Write-Error "Native gem preparation failed after $maxAttempts attempts (exit $exitCode)."
+            $reason = if ($exitCode -eq 2) { 'deterministic failure, not retried' } else { "failed after $attempt attempt(s)" }
+            Write-Error "Native gem preparation failed (exit $exitCode, $reason)."
             exit $exitCode
           }
           if (!(Test-Path $planPath)) {
@@ -461,13 +483,17 @@ jobs:
             exit 1
           }
 
-          # The build steps below (~line 700+) still build a hardcoded GTK3 gem list --
-          # item 7a (generalizing the build/vendoring steps to consume this plan
-          # directly) hasn't landed yet. Until it does, the *native_self_contained*
-          # subset of the plan and that hardcoded list must agree exactly, or the
-          # workflow could silently build a gem the planner never classified/patched
-          # (or skip one it did). Fail loudly on drift instead of trusting them to
-          # stay in sync by hand.
+          # The build steps below (~line 700+) still build a hardcoded GTK3 gem list.
+          # Item 7a's own scope was always narrower than that -- the DLL-vendoring/
+          # discovery half (which gems get the closure copied into, see the plan-driven
+          # $vendoringRoots further down in "Build GTK3 binary gem suite") -- and that
+          # part has landed. *Which gems get compiled* in the first place was
+          # deliberately deferred, real but separate follow-on work; this guard is
+          # the stopgap that shipped instead. Until that generalization happens, the
+          # *native_self_contained* subset of the plan and that hardcoded build list
+          # must agree exactly, or the workflow could silently build a gem the planner
+          # never classified/patched (or skip one it did). Fail loudly on drift instead
+          # of trusting them to stay in sync by hand.
           #
           # Deliberately filtered to native_self_contained only, not every plan
           # entry: BuildPlanner#plan_for resolves gtk3's *full* dependency closure,
@@ -754,13 +780,53 @@ jobs:
             Write-Host "::notice::$($unrecognizedSystemDlls.Count) DLL dependency(ies) outside the MSYS2 ucrt64 lane and not on the known-good system list (docs/DECISIONS.md Phase 5 section 3) -- assumed system-provided, but worth a human look: $($unrecognizedSystemDlls -join ', ')"
           }
 
-          foreach ($target in @('glib2', 'cairo')) {
-            $binTarget = Join-Path $sourceRoot "$target\vendor\local\bin"
+          # Vendoring targets come from the plan's vendoring_role (item 7a),
+          # not a hardcoded list -- for the real GTK3 stack this resolves to
+          # exactly glib2+cairo today (VendoringRoleClassifier's own spec
+          # locks that in against the real closure shape), same two gems
+          # this loop named directly before. Every root still gets the same
+          # full $runtimeDlls closure copied in, unchanged from today's
+          # behavior -- scoping each root down to only its own real subset
+          # (cairo's vendor/local/bin doesn't need the whole GNOME closure,
+          # just its own real dependency chain) is real, valuable follow-on
+          # work, deliberately not bundled into this change: it's a
+          # correctness-sensitive question of *what* gets vendored, not
+          # *which gems* are roots, and glib2 specifically is load-bearing
+          # for the dynamically-loaded typelib/gdk-pixbuf-loader discovery
+          # above in a way a naive per-gem static-import walk could silently
+          # miss.
+          $vendoringRoots = @(
+            (Get-Content $env:NATIVE_GEMS_PLAN -Raw | ConvertFrom-Json) |
+              Where-Object { $_.vendoring_role -eq 'vendoring_root' } |
+              ForEach-Object { $_.name }
+          )
+          if ($vendoringRoots.Count -eq 0) {
+            Write-Error "Vendoring failed: no vendoring_root gems found in the native gems plan."
+            exit 1
+          }
+
+          $requiredLoadsManifest = [ordered]@{}
+          foreach ($target in $vendoringRoots) {
+            $targetRoot = Join-Path $sourceRoot $target
+            if (!(Test-Path $targetRoot)) {
+              Write-Error "Vendoring failed: plan named '$target' as a vendoring root, but its source directory is missing at $targetRoot."
+              exit 1
+            }
+            $binTarget = Join-Path $targetRoot 'vendor\local\bin'
             New-Item -ItemType Directory -Path $binTarget -Force | Out-Null
-            foreach ($dll in ($runtimeDlls.Keys | Sort-Object)) {
+            $dllNames = @($runtimeDlls.Keys | Sort-Object)
+            foreach ($dll in $dllNames) {
               Copy-Item $runtimeDlls[$dll] $binTarget -Force
             }
+            $requiredLoadsManifest[$target] = $dllNames
           }
+
+          $requiredLoadsPath = Join-Path $env:RUNNER_TEMP 'required-loads-manifest.json'
+          $requiredLoadsManifest | ConvertTo-Json -Depth 4 | Set-Content -Path $requiredLoadsPath -Encoding utf8
+          "REQUIRED_LOADS_MANIFEST=$requiredLoadsPath" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "::group::Required loads manifest (which DLLs were vendored into which root gem)"
+          Get-Content $requiredLoadsPath | Write-Host
+          Write-Host "::endgroup::"
 
           foreach ($gemName in @('gobject-introspection', 'glib2')) {
             Push-Location (Join-Path $sourceRoot $gemName)
@@ -774,6 +840,13 @@ jobs:
           foreach ($gemName in @('gio2', 'cairo', 'cairo-gobject', 'pango', 'gdk_pixbuf2', 'atk', 'gdk3', 'gtk3')) {
             Build-GemWithHarness $gemName
           }
+
+      - name: Upload required loads manifest (debug info -- survives the runner)
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: required-loads-manifest
+          path: ${{ env.REQUIRED_LOADS_MANIFEST }}
+          if-no-files-found: error
 
       - name: Build and stage runtime gem bundle
         shell: powershell
