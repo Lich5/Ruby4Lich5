@@ -1558,13 +1558,54 @@ jobs:
             # back empty and get misread as a mismatch when the upload
             # actually succeeded. A genuine mismatch (both values present,
             # disagreeing) still fails immediately below, not retried away.
+            #
+            # Parsed with ConvertFrom-Json/Where-Object, not gh's own --jq --
+            # real bug, found live 2026-07-09: Windows PowerShell 5.1 mangles
+            # an embedded-double-quote argument when invoking a native exe
+            # (gh.exe here) -- confirmed directly, the jq expression arrived
+            # with its quotes stripped entirely ("select(.name ==
+            # R4L5-atk-...gem)", no quotes at all), a parse error jq
+            # correctly rejected. Not reproducible locally against pwsh
+            # (PowerShell Core) -- a genuine Windows-PowerShell-5.1-specific
+            # native-argument-passing quirk, not a syntax error this
+            # session's local validation could have caught. Parsing the
+            # plain JSON in PowerShell itself sidesteps the whole
+            # native-argv-quoting layer -- no expression string ever crosses
+            # a process boundary.
+            # Output captured and $LASTEXITCODE checked immediately, parsed
+            # only on success -- real gap, found and fixed 2026-07-09: piping
+            # gh release view straight into ConvertFrom-Json meant a genuine
+            # command failure (auth/network/rate-limit) looked identical to
+            # "digest not populated yet," so a persistent failure would
+            # silently retry 5 times and then get reported as the wrong
+            # thing -- "asset had no digest... may not have finished
+            # processing" -- masking the real error underneath.
             $remoteDigest = $null
+            $lastViewFailureText = $null
             for ($digestAttempt = 1; $digestAttempt -le 5; $digestAttempt++) {
-              $remoteDigest = (gh release view $tag --json assets --jq ".assets[] | select(.name == ""$publishName"") | .digest") -replace '^sha256:', ''
+              $viewOutput = gh release view $tag --json assets 2>&1
+              if ($LASTEXITCODE -eq 0) {
+                $lastViewFailureText = $null
+                try {
+                  $assetsJson = $viewOutput | ConvertFrom-Json
+                  $matchingAsset = $assetsJson.assets | Where-Object { $_.name -eq $publishName }
+                  if ($matchingAsset) {
+                    $remoteDigest = $matchingAsset.digest -replace '^sha256:', ''
+                  }
+                } catch {
+                  $lastViewFailureText = "$_"
+                }
+              } else {
+                $lastViewFailureText = "$viewOutput"
+              }
               if (-not [string]::IsNullOrWhiteSpace($remoteDigest)) {
                 break
               }
               Start-Sleep -Seconds 2
+            }
+            if ($lastViewFailureText) {
+              Write-Error "Publish failed: gh release view for $tag failed after 5 attempts -- $lastViewFailureText"
+              exit 1
             }
             if ([string]::IsNullOrWhiteSpace($remoteDigest)) {
               Write-Error "Publish failed: $tag's $publishName asset had no digest after 5 attempts -- GitHub's asset metadata may not have finished processing."
@@ -1680,14 +1721,39 @@ jobs:
             }
           }
 
-          # Same retry-on-empty-only fix as the individual-gem publish step above.
+          # Same retry-on-empty-only fix and same ConvertFrom-Json/
+          # Where-Object fix (not gh's own --jq) as the individual-gem
+          # publish step above -- same real Windows-PowerShell-5.1
+          # native-argument-quoting bug, same reasoning. Same output-
+          # captured-and-$LASTEXITCODE-checked-first fix too, same
+          # reasoning: a genuine gh failure must not be misread as "digest
+          # not populated yet."
           $remoteDigest = $null
+          $lastViewFailureText = $null
           for ($digestAttempt = 1; $digestAttempt -le 5; $digestAttempt++) {
-            $remoteDigest = (gh release view $tag --json assets --jq ".assets[] | select(.name == ""$zipName"") | .digest") -replace '^sha256:', ''
+            $viewOutput = gh release view $tag --json assets 2>&1
+            if ($LASTEXITCODE -eq 0) {
+              $lastViewFailureText = $null
+              try {
+                $assetsJson = $viewOutput | ConvertFrom-Json
+                $matchingAsset = $assetsJson.assets | Where-Object { $_.name -eq $zipName }
+                if ($matchingAsset) {
+                  $remoteDigest = $matchingAsset.digest -replace '^sha256:', ''
+                }
+              } catch {
+                $lastViewFailureText = "$_"
+              }
+            } else {
+              $lastViewFailureText = "$viewOutput"
+            }
             if (-not [string]::IsNullOrWhiteSpace($remoteDigest)) {
               break
             }
             Start-Sleep -Seconds 2
+          }
+          if ($lastViewFailureText) {
+            Write-Error "Publish failed: gh release view for $tag failed after 5 attempts -- $lastViewFailureText"
+            exit 1
           }
           if ([string]::IsNullOrWhiteSpace($remoteDigest)) {
             Write-Error "Publish failed: $tag's $zipName asset had no digest after 5 attempts -- GitHub's asset metadata may not have finished processing."
