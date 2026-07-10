@@ -104,6 +104,17 @@ jobs:
             // the CI comparison below.
             const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
+            // Distinguishes a genuine, deterministic data problem (wrong
+            // asset count, a malformed digest) from a transient one (the API
+            // call itself failing) -- real gap, found and fixed 2026-07-10:
+            // the caller below needs to fail-safe (warn + assume changed) on
+            // a network/rate-limit/auth hiccup, the same way the CI
+            // comparison already does, but must NOT fail-safe on one of
+            // these -- a malformed release is a real problem that retrying
+            // or assuming won't fix, and silently treating it as "probably
+            // just changed" would hide it instead of surfacing it.
+            class DigestValidationError extends Error {}
+
             // Both digest sources validated against the same exact pattern
             // before use -- real gap, found and fixed 2026-07-10: an
             // unvalidated blank/malformed digest (from either side) would
@@ -119,11 +130,11 @@ jobs:
               const release = await github.rest.repos.getReleaseByTag({ owner, repo, tag: gemReleaseTag });
               const zipAssets = release.data.assets.filter(a => a.name.endsWith('.zip'));
               if (zipAssets.length !== 1) {
-                throw new Error(`Expected exactly one .zip asset on ${gemReleaseTag}, found ${zipAssets.length}.`);
+                throw new DigestValidationError(`Expected exactly one .zip asset on ${gemReleaseTag}, found ${zipAssets.length}.`);
               }
               const digest = zipAssets[0].digest;
               if (!DIGEST_PATTERN.test(digest || '')) {
-                throw new Error(`${gemReleaseTag}'s .zip asset has a missing or malformed digest: '${digest}'.`);
+                throw new DigestValidationError(`${gemReleaseTag}'s .zip asset has a missing or malformed digest: '${digest}'.`);
               }
               return digest; // e.g. "sha256:abc123..." (64 hex chars, confirmed)
             }
@@ -132,7 +143,7 @@ jobs:
               const m = (releaseBody || '').match(/GemBundleDigest:\s*(\S+)/);
               if (!m) { return null; }
               if (!DIGEST_PATTERN.test(m[1])) {
-                throw new Error(`GemBundleDigest: line found but malformed (expected sha256:<64 hex>, got '${m[1]}').`);
+                throw new DigestValidationError(`GemBundleDigest: line found but malformed (expected sha256:<64 hex>, got '${m[1]}').`);
               }
               return m[1];
             }
@@ -195,13 +206,25 @@ jobs:
               }
 
               const recordedDigest = extractRecordedDigest(latest.body);
-              const currentBundleDigest = await getCurrentBundleDigest();
+              let currentBundleDigest = null;
               let gemsChanged;
-              if (recordedDigest === null) {
-                core.warning(`${latest.tag}'s release notes have no GemBundleDigest line. Assuming Gems changed, to fail safe toward proposing a bump rather than silently proposing none.`);
+              try {
+                currentBundleDigest = await getCurrentBundleDigest();
+                if (recordedDigest === null) {
+                  core.warning(`${latest.tag}'s release notes have no GemBundleDigest line. Assuming Gems changed, to fail safe toward proposing a bump rather than silently proposing none.`);
+                  gemsChanged = true;
+                } else {
+                  gemsChanged = recordedDigest !== currentBundleDigest;
+                }
+              } catch (e) {
+                if (e instanceof DigestValidationError) {
+                  // A genuine, deterministic problem (wrong asset count, a
+                  // malformed digest) -- not ours to paper over by assuming
+                  // "probably changed." Surface it.
+                  throw e;
+                }
+                core.warning(`Could not fetch the current gem-bundle digest: ${e.message}. Assuming Gems changed, to fail safe toward proposing a bump rather than silently proposing none.`);
                 gemsChanged = true;
-              } else {
-                gemsChanged = recordedDigest !== currentBundleDigest;
               }
 
               const rubyChanged = rubyField !== latest.ruby;
@@ -217,7 +240,7 @@ jobs:
                 proposedTag = `R4L5-v${rubyField}.${gemsField}.${ciField}`;
                 const reasons = [];
                 if (rubyChanged) reasons.push(`Ruby ${latest.ruby} -> ${rubyField} (ruby-series default changed)`);
-                if (gemsChanged) reasons.push(`Gems ${latest.gems} -> ${gemsField} (bundle digest changed: ${recordedDigest || '(none recorded)'} -> ${currentBundleDigest})`);
+                if (gemsChanged) reasons.push(`Gems ${latest.gems} -> ${gemsField} (bundle digest changed: ${recordedDigest || '(none recorded)'} -> ${currentBundleDigest || '(could not be fetched, assumed changed)'})`);
                 if (ciChanged) reasons.push(`CI ${latest.ci} -> ${parseInt(ciField, 10)} (installer/workflow files changed since ${latest.tag})`);
                 rationale = `Compared against the latest installer release (${latest.tag}):\n` +
                   reasons.map(r => `- ${r}`).join('\n');
