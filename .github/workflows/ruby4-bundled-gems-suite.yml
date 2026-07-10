@@ -1544,7 +1544,19 @@ jobs:
               }
             } else {
               $notes = "Built by Ruby4Lich5, commit $sha. The R4L5- prefix signals this gem was compiled/patched/vendored (or, for a pass-through gem, vetted and re-hosted as-is) by this factory -- see docs/PUNCHLIST-remaining-work.md, 'Gem/bundle naming convention -- LOCKED 2026-07-09'. This tag is a single current artifact, overwritten in place on rebuild, not an incrementing version -- verify by SHA-256 digest, not by trusting the tag alone."
-              gh release create $tag $publishPath --title "$gemName $version ($platform)" --notes $notes --target $sha
+              # --latest=false -- real gap, found live 2026-07-09: without
+              # it, gh's own default ("automatic based on date and
+              # version") silently hands the repo-wide "Latest" designation
+              # to whichever gem happens to be created last in this loop
+              # (alphabetically, sqlite3 today) -- confirmed directly, it
+              # displaced the actual installer release
+              # (R4L5-v040.001.002) from "Latest" the first time this ran
+              # clean end to end. Gems are never meant to claim it -- only
+              # installer releases do. This stops it recurring on a
+              # first-time create; a rebuild that clobbers an existing
+              # release (the other branch above) doesn't touch a release's
+              # Latest status at all, so nothing extra is needed there.
+              gh release create $tag $publishPath --title "$gemName $version ($platform)" --notes $notes --target $sha --latest=false
               if ($LASTEXITCODE -ne 0) {
                 Write-Error "Publish failed: gh release create failed for $tag."
                 exit $LASTEXITCODE
