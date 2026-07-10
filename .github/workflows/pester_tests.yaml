@@ -1,0 +1,39 @@
+name: Pester Tests
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**/*.ps1"
+      - "spec/powershell/**"
+  pull_request:
+    paths:
+      - "**/*.ps1"
+      - "spec/powershell/**"
+
+permissions:
+  contents: read
+
+jobs:
+  pester:
+    runs-on: windows-latest
+    name: Run Pester tests
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Pester 6.0.0
+        shell: pwsh
+        run: |
+          Install-Module -Name Pester -RequiredVersion 6.0.0 -Force -SkipPublisherCheck -Scope CurrentUser
+
+      - name: Run Pester tests
+        shell: pwsh
+        run: |
+          Import-Module Pester -RequiredVersion 6.0.0 -Force
+          $config = New-PesterConfiguration
+          $config.Run.Path = 'spec/powershell'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $config
