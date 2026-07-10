@@ -47,16 +47,22 @@ jobs:
     name: Build installer (windows)
     runs-on: windows-latest
     timeout-minutes: 45
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout installer assets
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
+      # GH_TOKEN scoped to just this step and "Fetch gem bundle from Release"
+      # below -- the only two steps that call gh at all. Every step after
+      # them executes externally sourced code (the downloaded RubyInstaller
+      # .exe, then the downloaded gems via gem install --local) and has no
+      # business holding a repo-scoped token while doing it.
       - name: Resolve latest RubyInstaller in series
         shell: powershell
         env:
           RUBY_SERIES_INPUT: ${{ inputs.ruby-series }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Not an ABI compatibility guard -- per docs/DECISIONS.md Phase 6, ruby-series is
           # a real per-build parameter, not hardcoded to one literal value, so a future ABI
@@ -83,9 +89,22 @@ jobs:
           $exeName = "rubyinstaller-$tag-x64.exe"     # run on the runner with /components to avoid docs/msys2
           $asset = $rel.assets | Where-Object { $_.name -eq $exeName }
           if (-not $asset) { Write-Error "Asset $exeName not found on $($rel.tag_name)."; exit 1 }
+          # RubyInstaller's own releases report a real sha256 digest per asset
+          # (same GitHub Releases API field this file already trusts for the
+          # gem bundle below) -- captured here, verified after download in the
+          # next step, so a compromised/corrupted mirror or a MITM'd download
+          # is caught before this .exe is ever executed. No retry/race handling
+          # needed here unlike the gem bundle: RubyInstaller's releases are an
+          # immutable third party we never --clobber, so the digest resolved
+          # now can't go stale before the download completes.
+          if ($asset.digest -notmatch '^sha256:[0-9a-f]{64}$') {
+            Write-Error "RubyInstaller release $($rel.tag_name) returned a missing or malformed digest for $exeName -- got '$($asset.digest)'."
+            exit 1
+          }
           "RUBY_VERSION=$rubyVersion"       | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "RUBY_EXE_URL=$($asset.browser_download_url)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "RubyInstaller $tag -> $exeName"
+          "RUBY_EXE_DIGEST=$($asset.digest)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "RubyInstaller $tag -> $exeName (sha256 recorded: $($asset.digest))"
 
       - name: Install Ruby tree to .\ruby (no rdoc, no MSYS2 -- avoided, not stripped)
         shell: powershell
@@ -94,6 +113,12 @@ jobs:
           # 'ruby' never writes rdoc docs or the MSYS2 toolchain. Run on the
           # runner (throwaway registration); we ship the resulting tree, not the .exe.
           Invoke-WebRequest -Uri $env:RUBY_EXE_URL -OutFile rubyinstaller.exe -UseBasicParsing
+          $localExeDigest = "sha256:" + (Get-FileHash -Path .\rubyinstaller.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($localExeDigest -ne $env:RUBY_EXE_DIGEST) {
+            Write-Error "RubyInstaller download digest mismatch -- expected $env:RUBY_EXE_DIGEST, got $localExeDigest. Refusing to run it."
+            exit 1
+          }
+          Write-Host "RubyInstaller digest verified: $localExeDigest"
           $ruby = Join-Path $PWD 'ruby'
           Start-Process -FilePath .\rubyinstaller.exe -Wait -ArgumentList `
             '/verysilent','/norestart','/currentuser',"/dir=$ruby",'/components=ruby','/tasks=nomodpath,noassocfiles,noridkinstall'
@@ -105,6 +130,7 @@ jobs:
         env:
           GEM_REPO_INPUT: ${{ inputs.gem-repo }}
           GEM_RELEASE_TAG_INPUT: ${{ inputs.gem-release-tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Read via $env:, not spliced into the script text -- a single quote in
           # either input could otherwise break out of the string and inject
