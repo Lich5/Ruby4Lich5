@@ -72,6 +72,22 @@ function Invoke-LichFetch {
   $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) 'lich-5-fetch.zip'
   Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -Headers $headers -UseBasicParsing -TimeoutSec 120
 
+  # GitHub's own Releases API reports a real sha256 digest per asset (present
+  # on this exact unauthenticated endpoint, confirmed directly -- no token
+  # available or needed here, this runs on an end user's machine). Verified
+  # before extraction: this is the one trust anchor on the only download in
+  # the whole repo that runs outside CI, so a mismatch fails closed rather
+  # than silently extracting and installing a corrupted or tampered archive.
+  if ($asset.digest -notmatch '^sha256:[0-9a-f]{64}$') {
+    Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+    throw "Release $tag returned a missing or malformed digest for lich-5.zip -- got '$($asset.digest)'. Refusing to install an unverified download."
+  }
+  $localZipDigest = "sha256:" + (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($localZipDigest -ne $asset.digest) {
+    Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+    throw "lich-5.zip digest mismatch -- expected $($asset.digest), got $localZipDigest. Download may be corrupted or tampered with."
+  }
+
   $parent = Split-Path $DestDir -Parent
   if (Test-Path $DestDir) {
     Remove-Item $DestDir -Recurse -Force
