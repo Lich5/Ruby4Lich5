@@ -3,24 +3,37 @@
 # assigns a version itself. See docs/PUNCHLIST-remaining-work.md's versioning
 # section for the full design and why each field means what it does.
 #
-# Ruby and Gems are direct derivations, not counters: Ruby comes straight from
+# Ruby is a direct derivation, not a counter: it comes straight from
 # build-ruby4lich5-installer.yaml's own ruby-series default (e.g. "4.0" ->
-# "040"); Gems comes straight from that same file's gem-release-tag default's
-# own "-vNNN" suffix (e.g. "...-v001" -> "001"). Neither needs history.
+# "040"). It never needs history.
 #
-# CI is the one true counter: it only increments when
-# Ruby4Lich5-installer.iss, fetch-lich.ps1, or this repo's own
-# build-ruby4lich5-installer.yaml actually changed since the latest R4L5-v*
-# release's own tag -- checked via a real commit comparison (base is the tag
-# name itself, not release.target_commitish; that field is just the literal
-# branch-name string passed at creation time, e.g. "main", never resolved to
-# a SHA, so it silently drifts to whatever main currently is on every run
-# instead of staying pinned to release time -- confirmed empirically against
-# every release in this repo before using the tag name instead). Not assumed
-# from the PR's file list, since a PR can touch those paths without the diff
-# actually changing anything meaningful (e.g. a comment-only edit) -- though
-# as a first pass this treats any diff in those files as CI-worthy; refine
-# later if that proves too eager.
+# Gems and CI are both counters now (reworked 2026-07-10 -- Gems used to be a
+# direct derivation too, read straight off the gem-bundle tag's own "-vNNN"
+# suffix, but the locked naming convention (docs/PUNCHLIST-remaining-work.md)
+# made the gem-bundle tag a single, fixed, eternal name whose *content*
+# changes via `gh release upload --clobber` -- there's no number left in the
+# tag to read). Gems increments when the gem-bundle release's real current
+# SHA-256 digest differs from the GemBundleDigest: line recorded in the
+# latest tagged installer release's own notes (that field is logged by
+# build-ruby4lich5-installer.yaml's "Fetch gem bundle" step for a human to
+# transcribe into the release they create by hand, same as
+# RubyVersion/GemBundleVersion already work -- installer releases are
+# deliberately human-authored, not workflow-created). If a prior installer
+# release has no GemBundleDigest recorded at all, this fails safe toward
+# proposing a bump rather than assuming nothing changed.
+#
+# CI increments when Ruby4Lich5-installer.iss, fetch-lich.ps1, or this repo's
+# own build-ruby4lich5-installer.yaml actually changed since the latest
+# R4L5-v* release's own tag -- checked via a real commit comparison (base is
+# the tag name itself, not release.target_commitish; that field is just the
+# literal branch-name string passed at creation time, e.g. "main", never
+# resolved to a SHA, so it silently drifts to whatever main currently is on
+# every run instead of staying pinned to release time -- confirmed
+# empirically against every release in this repo before using the tag name
+# instead). Not assumed from the PR's file list, since a PR can touch those
+# paths without the diff actually changing anything meaningful (e.g. a
+# comment-only edit) -- though as a first pass this treats any diff in those
+# files as CI-worthy; refine later if that proves too eager.
 #
 # Only the installer family ever claims GitHub's repo-wide "Latest" -- gem
 # releases are deliberately excluded (see docs/PUNCHLIST-remaining-work.md),
@@ -74,15 +87,55 @@ jobs:
             }
 
             const rubySeries = extractDefault('ruby-series'); // e.g. "4.0"
-            const gemReleaseTag = extractDefault('gem-release-tag'); // e.g. "...-v001"
+            const gemReleaseTag = extractDefault('gem-release-tag'); // e.g. "R4L5-gem-bundle-x64-mingw-ucrt"
 
             const rubyPartsMatch = rubySeries.match(/^(\d+)\.(\d+)$/);
             if (!rubyPartsMatch) { throw new Error(`ruby-series default '${rubySeries}' doesn't look like 'N.N'`); }
             const rubyField = (rubyPartsMatch[1] + rubyPartsMatch[2]).padStart(3, '0');
 
-            const gemsMatch = gemReleaseTag.match(/-v(\d+)$/);
-            if (!gemsMatch) { throw new Error(`gem-release-tag default '${gemReleaseTag}' doesn't end in '-vNNN'`); }
-            const gemsField = gemsMatch[1].padStart(3, '0');
+            // Gems is a counter now, not a direct derivation -- real rework,
+            // 2026-07-10: the gem-bundle tag used to carry its own -vNNN
+            // suffix, a real version number to read straight off, but under
+            // the locked naming convention it's now a single, fixed, eternal
+            // tag whose *content* changes via `gh release upload --clobber`
+            // -- there's no number left in the tag name to parse. Compare
+            // the bundle's real current digest against whatever the latest
+            // tagged installer release recorded it consumed, same shape as
+            // the CI comparison below.
+            const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
+
+            // Both digest sources validated against the same exact pattern
+            // before use -- real gap, found and fixed 2026-07-10: an
+            // unvalidated blank/malformed digest (from either side) would
+            // still satisfy a !== comparison, so gemsChanged would come out
+            // "true" for the wrong reason, and the rationale text would
+            // silently render "undefined" or an empty string into the PR
+            // comment instead of a real digest. Fail loudly here instead --
+            // a malformed digest means something upstream is already wrong
+            // (GitHub's asset metadata not yet populated, a hand-edited
+            // GemBundleDigest: line that got mangled, etc.), not something
+            // to paper over with a confusing comment.
+            async function getCurrentBundleDigest() {
+              const release = await github.rest.repos.getReleaseByTag({ owner, repo, tag: gemReleaseTag });
+              const zipAssets = release.data.assets.filter(a => a.name.endsWith('.zip'));
+              if (zipAssets.length !== 1) {
+                throw new Error(`Expected exactly one .zip asset on ${gemReleaseTag}, found ${zipAssets.length}.`);
+              }
+              const digest = zipAssets[0].digest;
+              if (!DIGEST_PATTERN.test(digest || '')) {
+                throw new Error(`${gemReleaseTag}'s .zip asset has a missing or malformed digest: '${digest}'.`);
+              }
+              return digest; // e.g. "sha256:abc123..." (64 hex chars, confirmed)
+            }
+
+            function extractRecordedDigest(releaseBody) {
+              const m = (releaseBody || '').match(/GemBundleDigest:\s*(\S+)/);
+              if (!m) { return null; }
+              if (!DIGEST_PATTERN.test(m[1])) {
+                throw new Error(`GemBundleDigest: line found but malformed (expected sha256:<64 hex>, got '${m[1]}').`);
+              }
+              return m[1];
+            }
 
             const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
             const tagPattern = /^R4L5-v(\d{3})\.(\d{3})\.(\d{3})$/;
@@ -91,6 +144,7 @@ jobs:
               .filter(x => x.m)
               .map(x => ({
                 tag: x.r.tag_name,
+                body: x.r.body,
                 ruby: x.m[1], gems: x.m[2], ci: parseInt(x.m[3], 10),
               }))
               .sort((a, b) => a.ruby.localeCompare(b.ruby) || a.gems.localeCompare(b.gems) || (a.ci - b.ci));
@@ -98,16 +152,20 @@ jobs:
             let proposedTag, rationale;
 
             if (installerReleases.length === 0) {
-              // Bootstrap: no prior R4L5-v release to diff against. This exact
-              // value was agreed by hand (2026-07-09) -- yesterday's real,
-              // hardware-validated build counts as CI generation 1 even though
-              // it was never formally tagged, so the first real tag starts at
-              // CI generation 2, not 1. Not derivable from git history; stated
-              // here as documented fact.
+              // Bootstrap: no prior R4L5-v release to diff against. These
+              // exact values were agreed by hand (2026-07-09) -- yesterday's
+              // real, hardware-validated build counts as generation 1 even
+              // though it was never formally tagged under this scheme, so
+              // the first real tag starts at Gems generation 1 and CI
+              // generation 2, not 0/1. Not derivable from git history or a
+              // digest comparison (there's nothing to compare against yet);
+              // stated here as documented fact, same status the CI bootstrap
+              // value already had.
+              const bootstrapGems = '001';
               const bootstrapCi = '002';
-              proposedTag = `R4L5-v${rubyField}.${gemsField}.${bootstrapCi}`;
+              proposedTag = `R4L5-v${rubyField}.${bootstrapGems}.${bootstrapCi}`;
               rationale = 'No prior R4L5-v release exists yet. Proposing the documented bootstrap value ' +
-                '(CI starts at 002, not 001 -- see docs/PUNCHLIST-remaining-work.md\'s versioning section for why) ' +
+                '(Gems starts at 001, CI starts at 002 -- see docs/PUNCHLIST-remaining-work.md\'s versioning section for why) ' +
                 'rather than deriving it, since there is nothing to diff against.';
             } else {
               const latest = installerReleases[installerReleases.length - 1];
@@ -136,20 +194,30 @@ jobs:
                 ciChanged = true;
               }
 
+              const recordedDigest = extractRecordedDigest(latest.body);
+              const currentBundleDigest = await getCurrentBundleDigest();
+              let gemsChanged;
+              if (recordedDigest === null) {
+                core.warning(`${latest.tag}'s release notes have no GemBundleDigest line. Assuming Gems changed, to fail safe toward proposing a bump rather than silently proposing none.`);
+                gemsChanged = true;
+              } else {
+                gemsChanged = recordedDigest !== currentBundleDigest;
+              }
+
               const rubyChanged = rubyField !== latest.ruby;
-              const gemsChanged = gemsField !== latest.gems;
               const ciField = ciChanged ? String(latest.ci + 1).padStart(3, '0') : String(latest.ci).padStart(3, '0');
+              const gemsField = gemsChanged ? String(parseInt(latest.gems, 10) + 1).padStart(3, '0') : latest.gems;
 
               if (!rubyChanged && !gemsChanged && !ciChanged) {
                 proposedTag = null;
                 rationale = `No change detected against the latest installer release (${latest.tag}) -- ` +
-                  `Ruby, Gems, and the tracked installer files (Ruby4Lich5-installer.iss, fetch-lich.ps1, ` +
+                  `Ruby, Gems (bundle digest), and the tracked installer files (Ruby4Lich5-installer.iss, fetch-lich.ps1, ` +
                   `build-ruby4lich5-installer.yaml) all match. No version bump proposed.`;
               } else {
                 proposedTag = `R4L5-v${rubyField}.${gemsField}.${ciField}`;
                 const reasons = [];
                 if (rubyChanged) reasons.push(`Ruby ${latest.ruby} -> ${rubyField} (ruby-series default changed)`);
-                if (gemsChanged) reasons.push(`Gems ${latest.gems} -> ${gemsField} (gem-release-tag default changed)`);
+                if (gemsChanged) reasons.push(`Gems ${latest.gems} -> ${gemsField} (bundle digest changed: ${recordedDigest || '(none recorded)'} -> ${currentBundleDigest})`);
                 if (ciChanged) reasons.push(`CI ${latest.ci} -> ${parseInt(ciField, 10)} (installer/workflow files changed since ${latest.tag})`);
                 rationale = `Compared against the latest installer release (${latest.tag}):\n` +
                   reasons.map(r => `- ${r}`).join('\n');
