@@ -1583,20 +1583,31 @@ jobs:
             $remoteDigest = $null
             $lastViewFailureText = $null
             for ($digestAttempt = 1; $digestAttempt -le 5; $digestAttempt++) {
-              $viewOutput = gh release view $tag --json assets 2>&1
-              if ($LASTEXITCODE -eq 0) {
-                $lastViewFailureText = $null
-                try {
-                  $assetsJson = $viewOutput | ConvertFrom-Json
-                  $matchingAsset = $assetsJson.assets | Where-Object { $_.name -eq $publishName }
-                  if ($matchingAsset) {
-                    $remoteDigest = $matchingAsset.digest -replace '^sha256:', ''
+              # gh release view itself wrapped in try/catch too, not just the
+              # JSON parse below -- real gap, found and fixed 2026-07-09: the
+              # same EAP=Stop exception-promotion documented and guarded
+              # against for the existence check above applies here just as
+              # much, and an uncaught throw on this line would abort the
+              # whole step immediately, skipping the retry loop entirely
+              # instead of recording the failure and trying again.
+              try {
+                $viewOutput = gh release view $tag --json assets 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                  $lastViewFailureText = $null
+                  try {
+                    $assetsJson = $viewOutput | ConvertFrom-Json
+                    $matchingAsset = $assetsJson.assets | Where-Object { $_.name -eq $publishName }
+                    if ($matchingAsset) {
+                      $remoteDigest = $matchingAsset.digest -replace '^sha256:', ''
+                    }
+                  } catch {
+                    $lastViewFailureText = "$_"
                   }
-                } catch {
-                  $lastViewFailureText = "$_"
+                } else {
+                  $lastViewFailureText = "$viewOutput"
                 }
-              } else {
-                $lastViewFailureText = "$viewOutput"
+              } catch {
+                $lastViewFailureText = "$_"
               }
               if (-not [string]::IsNullOrWhiteSpace($remoteDigest)) {
                 break
@@ -1731,20 +1742,28 @@ jobs:
           $remoteDigest = $null
           $lastViewFailureText = $null
           for ($digestAttempt = 1; $digestAttempt -le 5; $digestAttempt++) {
-            $viewOutput = gh release view $tag --json assets 2>&1
-            if ($LASTEXITCODE -eq 0) {
-              $lastViewFailureText = $null
-              try {
-                $assetsJson = $viewOutput | ConvertFrom-Json
-                $matchingAsset = $assetsJson.assets | Where-Object { $_.name -eq $zipName }
-                if ($matchingAsset) {
-                  $remoteDigest = $matchingAsset.digest -replace '^sha256:', ''
+            # gh release view itself wrapped in try/catch too -- same real
+            # gap and fix as the individual-gem publish step above (an
+            # uncaught EAP=Stop throw here would abort the step instead of
+            # being recorded and retried).
+            try {
+              $viewOutput = gh release view $tag --json assets 2>&1
+              if ($LASTEXITCODE -eq 0) {
+                $lastViewFailureText = $null
+                try {
+                  $assetsJson = $viewOutput | ConvertFrom-Json
+                  $matchingAsset = $assetsJson.assets | Where-Object { $_.name -eq $zipName }
+                  if ($matchingAsset) {
+                    $remoteDigest = $matchingAsset.digest -replace '^sha256:', ''
+                  }
+                } catch {
+                  $lastViewFailureText = "$_"
                 }
-              } catch {
-                $lastViewFailureText = "$_"
+              } else {
+                $lastViewFailureText = "$viewOutput"
               }
-            } else {
-              $lastViewFailureText = "$viewOutput"
+            } catch {
+              $lastViewFailureText = "$_"
             }
             if (-not [string]::IsNullOrWhiteSpace($remoteDigest)) {
               break
