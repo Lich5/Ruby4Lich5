@@ -64,5 +64,17 @@ RSpec.describe Ruby4Lich5::StagedGemSpecFinder do
 
       expect(closure.resolve.map { |n| n[:name] }).to eq(%w[rexml kramdown])
     end
+
+    it 'raises CorruptGemError naming the offending path when a staged .gem file is genuinely unreadable' do
+      # A real .gem is a tar archive; garbage bytes under a .gem name
+      # reproduces a genuinely corrupt/truncated download, not a fixture
+      # standing in for one.
+      corrupt_path = File.join(@pkg_dir, 'broken-1.0.0.gem')
+      File.write(corrupt_path, 'not actually a gem archive')
+
+      finder = described_class.new(pkg_dir: @pkg_dir)
+
+      expect { finder.call('broken') }.to raise_error(described_class::CorruptGemError, /#{Regexp.escape(corrupt_path)}/)
+    end
   end
 end

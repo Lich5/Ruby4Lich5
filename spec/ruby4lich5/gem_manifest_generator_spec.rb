@@ -121,6 +121,61 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
           'archive'  => 'gem'
         )
       end
+
+      it 'calls native_digest_lookup exactly once, not twice, for the same (name, version)' do
+        # A standalone single-native-member unit needs the same fact for
+        # both its own artifact block (artifact_for) and its packages entry
+        # (build_package) -- real duplicate call found in review 2026-07-11,
+        # since the real lookup shells out to `gh api` per call.
+        calls = []
+        counting_lookup = lambda do |name, version|
+          calls << [name, version]
+          "sha256:native-digest-#{name}-#{version}"
+        end
+        closure = described_class::GTK3_STACK.map { |n| node(n, '4.3.6') } + [node('sqlite3', '2.9.5')]
+        generator = described_class.new(
+          native_names: described_class::GTK3_STACK + ['sqlite3'], pure_names: [], ruby_abi: '4.0',
+          platform: 'x64-mingw-ucrt', repo: 'Lich5/Ruby4Lich5', bundle_asset: bundle_asset, pkg_dir: @pkg_dir,
+          native_digest_lookup: counting_lookup, rubygems_client: rubygems_client, closure_resolver: stub_closure(closure)
+        )
+
+        generator.generate
+
+        expect(calls.count(['sqlite3', '2.9.5'])).to eq(1)
+      end
+
+      it 'does not carry a cached digest across two separate #generate calls on the same instance' do
+        # Real bug, found in review 2026-07-11, verified directly by the
+        # reviewer: the cache was created lazily inside native_digest_for
+        # (`@native_digest_cache ||= {}`), which persists for the life of
+        # the object -- a second real #generate call on the same instance
+        # would silently reuse the first run's digests even if the injected
+        # lookup would now return something different. Memoization is meant
+        # to scope to one generation run, not the object's whole lifetime.
+        responses = { 'sqlite3' => %w[sha256-run-one sha256-run-two] }
+        call_counts = Hash.new(0)
+        changing_lookup = lambda do |name, _version|
+          call_counts[name] += 1
+          if name == 'sqlite3'
+            "sha256:#{responses.fetch(name)[call_counts[name] - 1]}#{'0' * 50}"
+          else
+            "sha256:native-digest-#{name}"
+          end
+        end
+        closure = described_class::GTK3_STACK.map { |n| node(n, '4.3.6') } + [node('sqlite3', '2.9.5')]
+        generator = described_class.new(
+          native_names: described_class::GTK3_STACK + ['sqlite3'], pure_names: [], ruby_abi: '4.0',
+          platform: 'x64-mingw-ucrt', repo: 'Lich5/Ruby4Lich5', bundle_asset: bundle_asset, pkg_dir: @pkg_dir,
+          native_digest_lookup: changing_lookup, rubygems_client: rubygems_client, closure_resolver: stub_closure(closure)
+        )
+
+        first_run_digest = generator.generate['targets'].first['units'].find { |u| u['id'] == 'sqlite3' }['artifact']['sha256']
+        second_run_digest = generator.generate['targets'].first['units'].find { |u| u['id'] == 'sqlite3' }['artifact']['sha256']
+
+        expect(first_run_digest).to include('sha256-run-one')
+        expect(second_run_digest).to include('sha256-run-two')
+        expect(second_run_digest).not_to eq(first_run_digest)
+      end
     end
 
     context 'candidate-to-live promotion regression (2026-07-10 review finding)' do

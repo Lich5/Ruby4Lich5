@@ -38,10 +38,12 @@
 #        integrity problem -- a staged pure gem doesn't match RubyGems.org,
 #        or RubyGems.org has nothing to check it against),
 #        NativeGemDigestFetcher::FetchError (a native release's digest
-#        couldn't be read back), or InstalledGemClosure::MissingSpecError (a
-#        declared native/pure name has no staged .gem file at all) -- do not
-#        retry blindly; all three mean something real needs investigation,
-#        not a transient blip.
+#        couldn't be read back), InstalledGemClosure::MissingSpecError (a
+#        declared native/pure name has no staged .gem file at all), or
+#        StagedGemSpecFinder::CorruptGemError (a staged .gem file's own
+#        embedded metadata couldn't be read at all) -- do not retry blindly;
+#        all four mean something real needs investigation, not a transient
+#        blip.
 #   2 -- bad ARGV invocation.
 
 require 'json'
@@ -63,7 +65,18 @@ native_names_csv, pure_names_csv, ruby_abi, platform, repo, bundle_tag, bundle_f
   output_json_path = ARGV
 
 native_names = (Ruby4Lich5::GemManifestGenerator::GTK3_STACK + native_names_csv.split(',').map(&:strip).reject(&:empty?)).uniq
-pure_names = pure_names_csv.split(',').map(&:strip).reject(&:empty?)
+# Filtered against the *fully constructed* native_names (GTK3_STACK included),
+# not just the caller-supplied native_names_csv -- real gap, found in review
+# 2026-07-11: the workflow's own PowerShell side only excludes
+# NATIVE_RUNTIME_GEMS members from pure_names, since it has no knowledge of
+# GTK3_STACK at all (that constant is deliberately Ruby-only). The real
+# runtime-gems default input starts with the bare word "gtk3", which was
+# landing in both lists -- GemManifestGenerator#roots already absorbed the
+# duplication safely (its own `- GTK3_STACK` subtraction, plus
+# InstalledGemClosure's existing request-dedup), so this was never an
+# observable bug in generated output, but it left correctness depending on
+# two unrelated safety nets instead of a clean boundary here.
+pure_names = pure_names_csv.split(',').map(&:strip).reject(&:empty?) - native_names
 
 digest_fetcher = Ruby4Lich5::NativeGemDigestFetcher.new(repo: repo, platform: platform)
 closure_resolver = Ruby4Lich5::InstalledGemClosure.new(
@@ -85,7 +98,7 @@ begin
   )
   manifest = generator.generate
 rescue Ruby4Lich5::GemManifestGenerator::DigestValidationError, Ruby4Lich5::NativeGemDigestFetcher::FetchError,
-       Ruby4Lich5::InstalledGemClosure::MissingSpecError => e
+       Ruby4Lich5::InstalledGemClosure::MissingSpecError, Ruby4Lich5::StagedGemSpecFinder::CorruptGemError => e
   warn "ERROR: #{e.class}: #{e.message}"
   exit 1
 end

@@ -1870,7 +1870,16 @@ jobs:
           $nativeNames = ($env:NATIVE_RUNTIME_GEMS -split '[,\s]+') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
           $pureNames = ($env:RUNTIME_GEMS -split '[,\s]+') |
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $nativeNames -notcontains $_ }
-          $outPath = Join-Path $env:RUNNER_TEMP 'R4L5-gem-manifest.json'
+          # Named "manifest.json" here, not "R4L5-gem-manifest.json" -- real
+          # release-blocking bug, found in review 2026-07-11: gh release
+          # upload names the remote asset after the *local file's own
+          # basename* with no #label override, and this release's own notes
+          # (above) document the promotion procedure entirely in terms of
+          # "manifest.json" (gh release download ... --pattern manifest.json,
+          # ruby bin/retarget_gem_manifest.rb manifest.json ...). A
+          # differently-named local file would silently break every one of
+          # those documented commands at the first step.
+          $outPath = Join-Path $env:RUNNER_TEMP 'manifest.json'
 
           & ruby (Join-Path $env:GITHUB_WORKSPACE 'bin\generate_gem_manifest.rb') `
             ($nativeNames -join ',') ($pureNames -join ',') $rubyAbi $env:GEM_PLATFORM $env:GH_REPO `
@@ -1891,4 +1900,22 @@ jobs:
             Write-Error "Publishing the gem recovery manifest failed."
             exit $LASTEXITCODE
           }
-          Write-Host "Published gem recovery manifest to $($env:BUNDLE_TAG)"
+
+          # Regression check, added alongside the filename fix above: this
+          # release's own notes are only correct if the uploaded asset is
+          # genuinely reachable by the exact name they document. Confirms
+          # it directly against the real release rather than trusting the
+          # upload's own exit code alone -- a clobber that silently uploaded
+          # under an unexpected name would otherwise go unnoticed until a
+          # real promotion attempt failed on it.
+          $manifestAssetCheck = gh release view $env:BUNDLE_TAG --json assets 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Could not verify the manifest.json asset after upload -- $manifestAssetCheck"
+            exit 1
+          }
+          $manifestAssetJson = $manifestAssetCheck | ConvertFrom-Json
+          if (-not ($manifestAssetJson.assets | Where-Object { $_.name -eq 'manifest.json' })) {
+            Write-Error "Publish failed: no asset literally named 'manifest.json' found on $($env:BUNDLE_TAG) after upload -- the documented promotion commands in this release's own notes would not find it."
+            exit 1
+          }
+          Write-Host "Published gem recovery manifest to $($env:BUNDLE_TAG) (verified as manifest.json)"

@@ -102,6 +102,35 @@ RSpec.describe 'bin/generate_gem_manifest.rb (CLI integration)' do
     )
   end
 
+  it 'tolerates a GTK3_STACK member leaking into pure_names_csv, real workflow scenario' do
+    # The actual real-world gap (review 2026-07-11): the workflow's own
+    # PowerShell side has no knowledge of GTK3_STACK, so the real
+    # runtime-gems default input (which starts with the bare word "gtk3")
+    # lands "gtk3" in pure_names_csv too, alongside native_names_csv already
+    # carrying it via GTK3_STACK. Reproduced here with the exact real
+    # leaked value, no native_names_csv needed at all (GTK3_STACK alone
+    # populates it) -- proves the fix (subtracting native_names from
+    # pure_names) rather than relying on the two independent safety nets
+    # that happened to already absorb it.
+    all_native = Ruby4Lich5::GemManifestGenerator::GTK3_STACK
+    versions = all_native.to_h { |name| [name, '1.0.0'] }
+    versions.each { |name, version| build_real_gem(@pkg_dir, name, version) }
+    write_fake_gh(@bin_dir, @pkg_dir, versions)
+
+    cli_path = File.expand_path('../../bin/generate_gem_manifest.rb', __dir__)
+    env = { 'PATH' => "#{@bin_dir}:#{ENV.fetch('PATH', nil)}" }
+    args = ['', 'gtk3', '4.0', 'x64-mingw-ucrt', 'Lich5/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
+            'R4L5-gem-bundle-x64-mingw-ucrt.zip', "sha256:#{'c' * 64}", @pkg_dir, @out_path]
+
+    stdout_and_err, status = Open3.capture2e(env, 'ruby', cli_path, *args)
+
+    expect(status).to be_success, "CLI failed: #{stdout_and_err}"
+    manifest = JSON.parse(File.read(@out_path))
+    unit_ids = manifest['targets'].first['units'].map { |u| u['id'] }
+
+    expect(unit_ids).to eq(['gtk3-runtime']) # exactly one unit, no separate "gtk3" unit
+  end
+
   it 'exits nonzero and writes nothing when a declared native gem was never staged' do
     write_fake_gh(@bin_dir, @pkg_dir, {})
     cli_path = File.expand_path('../../bin/generate_gem_manifest.rb', __dir__)

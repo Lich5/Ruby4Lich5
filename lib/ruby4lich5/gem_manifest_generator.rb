@@ -3,6 +3,7 @@
 require 'digest'
 require_relative 'installed_gem_closure'
 require_relative 'gem_unit_grouper'
+require_relative 'digest_format'
 
 module Ruby4Lich5
   # Builds the gem recovery manifest Lich's self-heal reads, per
@@ -24,9 +25,6 @@ module Ruby4Lich5
     # RubyGems.org's own digest is missing/malformed -- a real, deterministic
     # problem, never papered over (docs/DECISIONS.md Phase 13 SS3).
     class DigestValidationError < StandardError; end
-
-    DIGEST_PATTERN = /\Asha256:[0-9a-f]{64}\z/
-    private_constant :DIGEST_PATTERN
 
     # The one declared grouping exception -- every other top-level requested
     # name gets its own standalone-by-default unit. Order matters here only
@@ -94,6 +92,15 @@ module Ruby4Lich5
     # @return [Hash] the full manifest document, ready for +JSON.generate+
     # @raise [DigestValidationError]
     def generate
+      # Reset here, not lazily inside native_digest_for -- real bug, found
+      # in review 2026-07-11: a lazy `||= {}` there persists across every
+      # call to #generate on the same instance, meaning a second real
+      # generation run would silently reuse the first run's cached digests
+      # even if the injected lookup would now return something different.
+      # Memoization is meant to scope to *one* generation run, not the
+      # object's whole lifetime.
+      @native_digest_cache = {}
+
       closure_nodes = @closure_resolver.resolve
       grouped = GemUnitGrouper.new(closure_nodes: closure_nodes, roots: roots).units
       by_name = closure_nodes.each_with_object({}) { |node, index| index[node.fetch(:name)] = node }
@@ -141,7 +148,7 @@ module Ruby4Lich5
       filename = "R4L5-#{name}-#{version}-#{@platform}.gem"
       { 'url'      => "https://github.com/#{@repo}/releases/download/R4L5-#{name}-#{version}-#{@platform}/#{filename}",
         'filename' => filename,
-        'sha256'   => @native_digest_lookup.call(name, version),
+        'sha256'   => native_digest_for(name, version),
         'archive'  => 'gem' }
     end
 
@@ -162,13 +169,29 @@ module Ruby4Lich5
 
       if native?(name)
         filename = "#{name}-#{version}-#{@platform}.gem"
-        digest = @native_digest_lookup.call(name, version)
+        digest = native_digest_for(name, version)
       else
         filename = "#{name}-#{version}.gem"
         digest = pure_digest_for(name, version, filename)
       end
 
       { 'name' => name, 'version' => version, 'filename' => filename, 'sha256' => digest }
+    end
+
+    # Memoized by (name, version) within the current #generate run (the
+    # cache itself is reset at the top of #generate, not created lazily
+    # here) -- a standalone single-native-member unit (sqlite3, ox, curses,
+    # ffi) previously called +@native_digest_lookup+ twice for the identical
+    # pair, once from {#artifact_for} and once more from {#build_package}.
+    # Real, found in review 2026-07-11: the real lookup shells out to
+    # +gh api+ per call, so this was two live network round-trips for one
+    # fact, for each of those four gems, every run.
+    #
+    # @param name [String]
+    # @param version [String]
+    # @return [String] +"sha256:<64 lowercase hex>"+
+    def native_digest_for(name, version)
+      @native_digest_cache[[name, version]] ||= @native_digest_lookup.call(name, version)
     end
 
     # @param name [String]
@@ -222,7 +245,7 @@ module Ruby4Lich5
       return nil if sha.nil? || sha.to_s.strip.empty?
 
       candidate = "sha256:#{sha.downcase}"
-      DIGEST_PATTERN.match?(candidate) ? candidate : nil
+      DigestFormat.valid?(candidate) ? candidate : nil
     end
   end
 end

@@ -3,6 +3,7 @@
 require 'open3'
 require 'json'
 require_relative 'safe_token'
+require_relative 'digest_format'
 
 module Ruby4Lich5
   # Fetches the already-published, already-verified digest for a native
@@ -11,9 +12,6 @@ module Ruby4Lich5
   # class only reads it back, never recomputes it).
   class NativeGemDigestFetcher
     class FetchError < StandardError; end
-
-    DIGEST_PATTERN = /\Asha256:[0-9a-f]{64}\z/
-    private_constant :DIGEST_PATTERN
 
     # @param repo [String] +"owner/repo"+
     # @param platform [String] e.g. +"x64-mingw-ucrt"+
@@ -52,7 +50,7 @@ module Ruby4Lich5
       raise FetchError, "no #{filename} asset found on release #{tag}" if asset.nil?
 
       digest = asset['digest']
-      raise FetchError, "release #{tag}'s #{filename} has a missing or malformed digest: #{digest.inspect}" unless DIGEST_PATTERN.match?(digest.to_s)
+      raise FetchError, "release #{tag}'s #{filename} has a missing or malformed digest: #{digest.inspect}" unless DigestFormat.valid?(digest)
 
       digest
     end

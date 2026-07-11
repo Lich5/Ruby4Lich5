@@ -20,6 +20,14 @@ module Ruby4Lich5
   # already established in this project for cairo's synthesized gemspec
   # (docs/DECISIONS.md Phase 8, +Gem::Package.new(path).spec+).
   class StagedGemSpecFinder
+    # Raised when a staged +.gem+ file's own embedded metadata can't be
+    # read at all -- a genuinely corrupt or malformed archive, not something
+    # {InstalledGemClosure} could ever recover from. Names the offending
+    # path explicitly (real gap, found in review 2026-07-11:
+    # +Gem::Package+'s own raised errors don't reliably identify which of
+    # potentially many staged files actually failed).
+    class CorruptGemError < StandardError; end
+
     # @param pkg_dir [String] directory containing every staged +.gem+ file
     def initialize(pkg_dir:)
       @pkg_dir = pkg_dir
@@ -30,6 +38,7 @@ module Ruby4Lich5
     #   (ordinarily zero or one -- more than one would mean two differently-
     #   versioned copies of the same gem were staged, a real anomaly
     #   {InstalledGemClosure} already handles by picking the highest version)
+    # @raise [CorruptGemError]
     def call(name)
       specs_by_name.fetch(name, [])
     end
@@ -37,9 +46,14 @@ module Ruby4Lich5
     private
 
     # @return [Hash{String => Array<Gem::Specification>}]
+    # @raise [CorruptGemError]
     def specs_by_name
       @specs_by_name ||= Dir.glob(File.join(@pkg_dir, '*.gem')).each_with_object(Hash.new { |h, k| h[k] = [] }) do |path, index|
-        spec = Gem::Package.new(path).spec
+        spec = begin
+          Gem::Package.new(path).spec
+        rescue StandardError => e
+          raise CorruptGemError, "could not read gemspec from staged file #{path}: #{e.class}: #{e.message}"
+        end
         index[spec.name] << spec
       end
     end
