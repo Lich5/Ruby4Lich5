@@ -105,8 +105,10 @@ jobs:
       - name: Build sanitized PATH
         id: lanepath
         shell: powershell
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
         run: |
-          $msys = '${{ steps.msys2.outputs.msys2-location }}'
+          $msys = $env:MSYS2_LOCATION
           $prefix = $env:MSYS2_PREFIX
           if ([string]::IsNullOrWhiteSpace($msys) -or !(Test-Path $msys)) {
             Write-Error "MSYS2 setup failed: expected install root at '$msys' to exist."
@@ -282,13 +284,16 @@ jobs:
           $rubyRoot = $env:RUBY_ROOT
           $gemExe = $env:GEM_EXE
 
-          $env:Path = "$rubyRoot\bin;$msys\ucrt64\bin;$msys\usr\bin;$env:Path"
+          # MSYSTEM_PREFIX/MINGW_PREFIX/CC/MAKE/PKG_CONFIG are not set here --
+          # "Build sanitized PATH" and "Resolve native build surface" already
+          # exported the correct values via $env:GITHUB_ENV, which every
+          # subsequent step in this job inherits automatically. Re-assigning
+          # them here would be a no-op at best (real bug, found in review
+          # 2026-07-11: this used to hardcode '/ucrt64' instead of deriving
+          # from $env:MSYS2_PREFIX, and self-assigned $env:CC = $env:CC etc.
+          # for no effect).
+          $env:Path = "$rubyRoot\bin;$msys\$env:MSYS2_PREFIX\bin;$msys\usr\bin;$env:Path"
           $env:RI_DEVKIT = $msys
-          $env:MSYSTEM_PREFIX = '/ucrt64'
-          $env:MINGW_PREFIX = '/ucrt64'
-          $env:CC = $env:CC
-          $env:MAKE = $env:MAKE
-          $env:PKG_CONFIG = $env:PKG_CONFIG
 
           $buildDir = Join-Path $env:RUNNER_TEMP 'novel-gem-build'
           New-Item -ItemType Directory -Path $buildDir -Force | Out-Null
@@ -320,10 +325,27 @@ jobs:
           # (verified directly: it exists even when extconf never got far
           # enough to write mkmf.log at all, e.g. a plain compile error).
           # Collect both rather than assuming which one a given gem hits.
+          # Keyed by a SHA-256 digest of the full relative path under
+          # $buildDir, not just the immediate parent directory name or a
+          # separator-replaced version of the relative path -- real gap,
+          # found in review 2026-07-11: "-replace '[\\/]', '-'" alone isn't
+          # collision-resistant (Doug's own verified counterexample:
+          # 'a-b\c\mkmf.log' and 'a\b-c\mkmf.log' both sanitize to the
+          # identical 'a-b-c-mkmf.log'). The immediate parent directory name
+          # is kept as a human-readable prefix; the hash is what actually
+          # guarantees uniqueness.
+          $sha256 = [System.Security.Cryptography.SHA256]::Create()
           foreach ($pattern in @('mkmf.log', 'gem_make.out')) {
             Get-ChildItem -Path $buildDir -Recurse -Filter $pattern -File -ErrorAction SilentlyContinue |
-              ForEach-Object { Copy-Item $_.FullName (Join-Path $logDir "$($_.Directory.Name)-$pattern") -Force }
+              ForEach-Object {
+                $relativePath = $_.FullName.Substring($buildDir.Length).TrimStart('\', '/')
+                $hashBytes = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($relativePath))
+                $hashHex = ([System.BitConverter]::ToString($hashBytes) -replace '-', '').Substring(0, 12).ToLowerInvariant()
+                $readableName = $_.Directory.Name -replace '[^A-Za-z0-9._-]', '_'
+                Copy-Item $_.FullName (Join-Path $logDir "$readableName-$hashHex-$pattern")
+              }
           }
+          $sha256.Dispose()
           "$env:GEM_NAME $env:GEM_VERSION -- gem install exit code: $installExit" | Set-Content (Join-Path $logDir 'summary.txt')
 
           if ($installExit -eq 0) {
