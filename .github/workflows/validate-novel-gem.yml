@@ -1,0 +1,354 @@
+# Permanent version of item 8 on the punchlist. Answers one question for a
+# gem the front door has never touched -- does it compile with nothing more
+# than a *generic* MSYS2 UCRT64 toolchain, with no gem-specific curation at
+# all? Deliberately excludes every GTK-specific MSYS2 package
+# (gobject-introspection, gtk3, pdcurses, ncurses, sqlite3) from
+# ruby4-bundled-gems-suite.yml's install list -- including those would
+# quietly hand a lucky gem exactly the library it needs, defeating the point
+# of testing what a genuinely novel gem faces with only the basics.
+#
+# Not part of the real pipeline. Exists to let Ruby4Lich5::BuildPlanner's
+# design decisions (Classifier / KnownNativeGems / VendoringRoleClassifier)
+# get checked against a real MSYS2 compile attempt instead of stopping at
+# the classify/plan layer, which is as far as local (non-Windows) testing
+# can ever reach on its own.
+#
+# Promoted from a throwaway harness (deleted 2026-07-07) per Doug's request
+# for "the formal production version of a like tool" -- see
+# results_claude/Ruby4Lich5/validate-novel-gem-findings-2026-07-07.md for the
+# three real runs/lessons this design already reflects.
+
+name: Validate novel gem
+
+on:
+  workflow_dispatch:
+    inputs:
+      gem-name:
+        description: "Gem to attempt building from source, e.g. fast_cuid2."
+        required: true
+      gem-version:
+        description: "Exact version to attempt, e.g. 1.0.0."
+        required: true
+      ruby-installer-version:
+        description: "RubyInstaller UCRT archive version, for example 4.0.5-1."
+        required: false
+        default: "4.0.5-1"
+
+permissions: {}
+
+jobs:
+  validate_novel_gem:
+    name: Attempt generic MSYS2 build (windows-ucrt64)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    env:
+      MSYSTEM: UCRT64
+      MSYS2_PREFIX: ucrt64
+
+    steps:
+      - name: Validate inputs
+        shell: powershell
+        env:
+          GEM_NAME_INPUT: ${{ inputs.gem-name }}
+          GEM_VERSION_INPUT: ${{ inputs.gem-version }}
+          RUBY_INSTALLER_VERSION_INPUT: ${{ inputs.ruby-installer-version }}
+        run: |
+          # Read via $env:, not spliced directly into the script text as a quoted
+          # expression -- a single quote in a workflow_dispatch input could
+          # otherwise break out of the string and inject arbitrary PowerShell
+          # before any of the validation below ever runs.
+          $gemName = $env:GEM_NAME_INPUT
+          $gemVersion = $env:GEM_VERSION_INPUT
+          $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION_INPUT
+
+          if ($gemName -notmatch '^[A-Za-z0-9_.-]+$') {
+            Write-Error "gem-name contains disallowed characters: '$gemName'."
+            exit 1
+          }
+          if ($gemVersion -notmatch '^[A-Za-z0-9_.-]+$') {
+            Write-Error "gem-version contains disallowed characters: '$gemVersion'."
+            exit 1
+          }
+          if ($rubyInstallerVersion -notmatch '^\d+\.\d+\.\d+-\d+$') {
+            Write-Error "ruby-installer-version must look like N.N.N-N, for example 4.0.5-1; received '$rubyInstallerVersion'."
+            exit 1
+          }
+
+          "GEM_NAME=$gemName" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "GEM_VERSION=$gemVersion" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RUBY_INSTALLER_VERSION=$rubyInstallerVersion" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Deliberately generic: base-devel/gcc/make/binutils/pkgconf/libffi,
+      # plus openssl (added 2026-07-07, after fast_cuid2's first real run
+      # failed on `openssl/rand.h` missing -- confirmed via
+      # packages.msys2.org that mingw-w64-ucrt-x86_64-openssl is a real
+      # package, 3.6.3-1 in the ucrt64 repo, not guessed). Still no other
+      # GTK-specific packages -- see header comment.
+      - name: Install generic MSYS2 UCRT build surface
+        id: msys2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            base-devel
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc-libs
+            mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-libffi
+            mingw-w64-ucrt-x86_64-openssl
+
+      - name: Build sanitized PATH
+        id: lanepath
+        shell: powershell
+        run: |
+          $msys = '${{ steps.msys2.outputs.msys2-location }}'
+          $prefix = $env:MSYS2_PREFIX
+          if ([string]::IsNullOrWhiteSpace($msys) -or !(Test-Path $msys)) {
+            Write-Error "MSYS2 setup failed: expected install root at '$msys' to exist."
+            exit 1
+          }
+
+          $orig = $env:Path -split ';'
+          $filtered = $orig | Where-Object {
+            $_ -and
+            ($_ -notlike '*\Ruby\*\x64\msys64\*') -and
+            ($_ -notmatch '^C:\\hostedtoolcache\\windows\\Ruby(\\|$)') -and
+            ($_ -ne 'C:\mingw64\bin') -and
+            ($_ -notmatch '^C:\\Strawberry(\\|$)')
+          }
+          $lanePath = @("$msys\$prefix\bin", "$msys\usr\bin") + $filtered
+          $joined = ($lanePath -join ';')
+
+          "MSYS2_ROOT=$msys" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "path=$joined" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "RI_DEVKIT=$msys" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "MSYSTEM_PREFIX=/$prefix" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "MINGW_PREFIX=/$prefix" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Resolve native build surface
+        shell: powershell
+        env:
+          PATH: ${{ steps.lanepath.outputs.path }}
+        run: |
+          $msys = $env:MSYS2_ROOT
+          $prefix = $env:MSYS2_PREFIX
+          $gcc = Join-Path $msys "$prefix\bin\gcc.exe"
+          $pkgConfig = Join-Path $msys "$prefix\bin\pkg-config.exe"
+          $pkgConfigPath = "$msys\$prefix\lib\pkgconfig;$msys\lib\pkgconfig"
+
+          $makeCandidates = @(
+            (Join-Path $msys 'usr\bin\make.exe'),
+            (Join-Path $msys "$prefix\bin\mingw32-make.exe")
+          )
+          $make = $makeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($make) { $make = $make -replace '\\', '/' }
+
+          $required = [ordered]@{ gcc = $gcc; make = $make; 'pkg-config' = $pkgConfig }
+          $missing = @()
+          foreach ($name in $required.Keys) {
+            $path = $required[$name]
+            if ([string]::IsNullOrEmpty($path) -or !(Test-Path $path)) {
+              $missing += $name
+            }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Error "Native build surface validation failed: missing tool(s): $($missing -join ', ')."
+            exit 1
+          }
+
+          "CC=$gcc" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "MAKE=$make" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "PKG_CONFIG=$pkgConfig" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "PKG_CONFIG_PATH=$pkgConfigPath" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # GH_TOKEN scoped to just this step -- every step after it executes
+      # externally sourced code (the downloaded RubyInstaller archive, then
+      # the target gem's own install/build hooks) and has no business
+      # holding a repo-scoped token while doing it. Same convention as
+      # build-ruby4lich5-installer.yaml's "Resolve latest RubyInstaller in
+      # series" step.
+      - name: Resolve RubyInstaller release digest
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION
+          $tag = "RubyInstaller-$rubyInstallerVersion"
+          $archiveName = "rubyinstaller-$rubyInstallerVersion-x64.7z"
+
+          $rel = gh api "repos/oneclick/rubyinstaller2/releases/tags/$tag" | ConvertFrom-Json
+          $asset = $rel.assets | Where-Object { $_.name -eq $archiveName }
+          if (-not $asset) {
+            Write-Error "Asset $archiveName not found on release $tag."
+            exit 1
+          }
+          # RubyInstaller's own releases report a real sha256 digest per
+          # asset (same GitHub Releases API field build-ruby4lich5-installer.yaml
+          # already trusts for this same third party) -- captured here,
+          # verified after download in the next step, so a compromised or
+          # corrupted mirror is caught before 7z or ruby.exe ever touch it.
+          if ($asset.digest -notmatch '^sha256:[0-9a-f]{64}$') {
+            Write-Error "RubyInstaller release $tag returned a missing or malformed digest for $archiveName -- got '$($asset.digest)'."
+            exit 1
+          }
+
+          "RUBY_ARCHIVE_URL=$($asset.browser_download_url)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RUBY_ARCHIVE_DIGEST=$($asset.digest)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "RubyInstaller $tag -> $archiveName (sha256 recorded: $($asset.digest))"
+
+      - name: Download and extract RubyInstaller
+        shell: powershell
+        run: |
+          $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION
+          $rubyParent = 'C:\Ruby4Lich5\ruby'
+          $archive = Join-Path $env:RUNNER_TEMP "rubyinstaller-$rubyInstallerVersion-x64.7z"
+
+          New-Item -ItemType Directory -Path $rubyParent -Force | Out-Null
+          Invoke-WebRequest -Uri $env:RUBY_ARCHIVE_URL -OutFile $archive -UseBasicParsing -TimeoutSec 60
+          if (!(Test-Path $archive)) {
+            Write-Error "RubyInstaller download failed: expected archive $archive was not created."
+            exit 1
+          }
+
+          $localDigest = "sha256:" + (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($localDigest -ne $env:RUBY_ARCHIVE_DIGEST) {
+            Write-Error "RubyInstaller download digest mismatch -- expected $env:RUBY_ARCHIVE_DIGEST, got $localDigest. Refusing to extract or run it."
+            exit 1
+          }
+          Write-Host "RubyInstaller archive digest verified: $localDigest"
+
+          $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
+          if (!(Test-Path $sevenZip)) {
+            $sevenZip = '7z.exe'
+          }
+          & $sevenZip x $archive "-o$rubyParent" -y
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "RubyInstaller extraction failed."
+            exit $LASTEXITCODE
+          }
+
+          $rubyExe = Get-ChildItem $rubyParent -Recurse -Filter ruby.exe -File | Where-Object {
+            $_.FullName -match '\\bin\\ruby\.exe$'
+          } | Select-Object -First 1
+          if (-not $rubyExe) {
+            Write-Error "RubyInstaller extraction failed: ruby.exe was not found under $rubyParent."
+            exit 1
+          }
+          $rubyRoot = Split-Path (Split-Path $rubyExe.FullName -Parent) -Parent
+          & $rubyExe.FullName --version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "RubyInstaller validation failed: ruby.exe could not run."
+            exit $LASTEXITCODE
+          }
+
+          $gemExe = Join-Path $rubyRoot 'bin\gem.cmd'
+          if (!(Test-Path $gemExe)) {
+            Write-Error "RubyInstaller validation failed: gem.cmd was not found at $gemExe."
+            exit 1
+          }
+
+          "RUBY_ROOT=$rubyRoot" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RUBY_EXE=$($rubyExe.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "GEM_EXE=$gemExe" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Attempt generic build of the target gem
+        shell: powershell
+        env:
+          PATH: ${{ steps.lanepath.outputs.path }}
+        run: |
+          # gem.cmd is a batch-file wrapper, not a raw .exe -- under classic
+          # Windows PowerShell (what GH Actions' `shell: powershell` steps
+          # actually run, confirmed directly from a real failed run's log:
+          # "shell: ...WindowsPowerShell\v1.0\powershell.EXE"), any stderr
+          # line from a redirected (2>&1) .cmd invocation becomes a
+          # NativeCommandError -- a *terminating* error under whatever
+          # $ErrorActionPreference this step starts with, aborting the
+          # script immediately after gem install's first stderr line, before
+          # $LASTEXITCODE is ever read or any logs get written. Confirmed
+          # the hard way (2026-07-07, throwaway harness): a real run died
+          # here with no BUILD_EXIT_CODE/LOG_DIR ever written, which is
+          # exactly what cascaded into the "Upload build logs" step's own
+          # failure right after. Explicit Continue makes gem install's
+          # failure (the whole point of this workflow) a normal,
+          # non-terminating result instead.
+          $ErrorActionPreference = 'Continue'
+
+          $msys = $env:MSYS2_ROOT
+          $rubyRoot = $env:RUBY_ROOT
+          $gemExe = $env:GEM_EXE
+
+          $env:Path = "$rubyRoot\bin;$msys\ucrt64\bin;$msys\usr\bin;$env:Path"
+          $env:RI_DEVKIT = $msys
+          $env:MSYSTEM_PREFIX = '/ucrt64'
+          $env:MINGW_PREFIX = '/ucrt64'
+          $env:CC = $env:CC
+          $env:MAKE = $env:MAKE
+          $env:PKG_CONFIG = $env:PKG_CONFIG
+
+          $buildDir = Join-Path $env:RUNNER_TEMP 'novel-gem-build'
+          New-Item -ItemType Directory -Path $buildDir -Force | Out-Null
+
+          $logDir = Join-Path $env:RUNNER_TEMP 'novel-gem-logs'
+          New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+          $transcriptPath = Join-Path $logDir 'gem-install-transcript.log'
+
+          # Tee, not just Write-Host: the live run log expires with the
+          # workflow's retention window, and gem install's own raised error
+          # already includes the actual compiler/linker failure text inline
+          # (verified directly against real gem-install failures before
+          # writing this) -- that has to land in the downloadable artifact
+          # itself, not just the console.
+          Write-Host "::group::Attempting: gem install $env:GEM_NAME -v $env:GEM_VERSION --platform ruby"
+          & $gemExe install $env:GEM_NAME -v $env:GEM_VERSION --platform ruby --install-dir $buildDir --verbose 2>&1 |
+            Tee-Object -FilePath $transcriptPath
+          $installExit = $LASTEXITCODE
+          Write-Host "::endgroup::"
+
+          "BUILD_EXIT_CODE=$installExit" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          # Two different logs, two different failure stages: mkmf.log is
+          # extconf.rb's own probe log (have_library/pkg_config/etc. --
+          # relevant when a required system library isn't found, the
+          # failure this workflow specifically exists to probe for).
+          # gem_make.out is RubyGems' own consolidated log of the whole
+          # extconf+make run, written on every failure regardless of stage
+          # (verified directly: it exists even when extconf never got far
+          # enough to write mkmf.log at all, e.g. a plain compile error).
+          # Collect both rather than assuming which one a given gem hits.
+          foreach ($pattern in @('mkmf.log', 'gem_make.out')) {
+            Get-ChildItem -Path $buildDir -Recurse -Filter $pattern -File -ErrorAction SilentlyContinue |
+              ForEach-Object { Copy-Item $_.FullName (Join-Path $logDir "$($_.Directory.Name)-$pattern") -Force }
+          }
+          "$env:GEM_NAME $env:GEM_VERSION -- gem install exit code: $installExit" | Set-Content (Join-Path $logDir 'summary.txt')
+
+          if ($installExit -eq 0) {
+            Write-Host "::notice::$env:GEM_NAME $env:GEM_VERSION built and installed cleanly against a generic MSYS2 UCRT64 toolchain -- no gem-specific curation needed."
+          } else {
+            Write-Host "::warning::$env:GEM_NAME $env:GEM_VERSION failed to build against a generic MSYS2 UCRT64 toolchain (exit $installExit) -- see uploaded logs. This is diagnostic information, not a workflow failure."
+          }
+
+          "LOG_DIR=$logDir" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          # Real fix over the throwaway harness (findings doc, "Explicitly
+          # NOT fixed"): PowerShell never resets $LASTEXITCODE after a
+          # native command fails, and nothing above calls an explicit exit,
+          # so a *correctly diagnosed* gem failure left this step red. The
+          # diagnosis itself (BUILD_EXIT_CODE, the transcript, the notice/
+          # warning annotation, the uploaded logs) is already complete and
+          # correct at this point regardless of $installExit -- exit 0 here
+          # so the step's own pass/fail reflects "did this workflow do its
+          # job," not "did the gem happen to compile."
+          exit 0
+
+      - name: Upload build logs (always, pass or fail)
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: novel-gem-validation-logs
+          path: ${{ env.LOG_DIR }}
+          if-no-files-found: warn
