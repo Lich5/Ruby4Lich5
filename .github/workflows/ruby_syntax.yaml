@@ -38,7 +38,17 @@ jobs:
         env:
           CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         run: |
+          # step-security/changed-files appends a trailing backslash to every
+          # line except the last in its own multi-line output, regardless of
+          # the separator input requested here -- confirmed directly against
+          # a real run (2026-07-11): CHANGED_FILES genuinely contains real
+          # newlines between filenames, but each non-final line also ends in
+          # a literal `\`. `read -r` correctly preserves it (that's what -r
+          # is for), so a file passed straight through no longer exists on
+          # disk under that exact name. Stripped here rather than fighting
+          # the action's own escaping.
           while IFS= read -r file; do
+            file="${file%\\}"
             [ -z "$file" ] && continue
             ruby -c -- "$file"
           done <<< "$CHANGED_FILES"

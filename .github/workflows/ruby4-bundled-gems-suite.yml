@@ -1433,6 +1433,12 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       NATIVE_RUNTIME_GEMS: ${{ inputs.native-runtime-gems }}
+      # Workflow inputs, unlike step-scoped GITHUB_ENV writes, are visible
+      # in every job of the same run -- read directly here rather than
+      # relying on anything the build job set, since that job's own
+      # GITHUB_ENV never crosses the job boundary.
+      RUNTIME_GEMS: ${{ inputs.runtime-gems }}
+      RUBY_INSTALLER_VERSION: ${{ inputs.ruby-installer-version }}
 
     steps:
       - name: Download staged runtime gem bundle
@@ -1440,6 +1446,12 @@ jobs:
         with:
           name: ruby4-bundled-gems-windows-ucrt64
           path: dist/pkg
+
+      # generate_gem_manifest.rb is dependency-free stdlib, same design
+      # principle as bin/prepare_native_gems.rb -- doesn't need the target
+      # Ruby tree this job never downloads, just *some* modern Ruby on PATH.
+      - name: Set up Ruby (for gem manifest generation)
+        uses: ruby/setup-ruby@0dafeac902942906541bc140009cdbf32665b601 # v1.315.0
 
       # Publishes only after the clean-install smoke test already passed --
       # never a gem that merely compiled. Per docs/PUNCHLIST-remaining-work.md's
@@ -1681,23 +1693,35 @@ jobs:
           # failure -- both exit 1. Only the exact not-found text is
           # treated as absence; anything else fails loudly instead of
           # silently falling through to gh release create.
-          $liveTagExists = $false
+          #
+          # Also reads isDraft, not just tagName -- real bug, found in
+          # review 2026-07-10: querying only tagName means an unpromoted
+          # draft from an earlier run looks identical to a genuinely live,
+          # published release. Without this, a second build before a human
+          # gets around to promoting the first one would wrongly branch to
+          # publishing a *candidate* against a still-draft baseline instead
+          # of just updating that same draft in place -- silently treating
+          # unreviewed content as though it were already authoritative.
+          $liveReleaseExists = $false
+          $liveReleaseIsDraft = $false
           $liveTagFailureText = ''
           try {
-            $liveTagViewResult = gh release view $liveTag --json tagName 2>&1
+            $liveTagViewResult = gh release view $liveTag --json tagName,isDraft 2>&1
             if ($LASTEXITCODE -eq 0) {
-              $liveTagExists = $true
+              $liveReleaseExists = $true
+              $liveReleaseJson = $liveTagViewResult | ConvertFrom-Json
+              $liveReleaseIsDraft = [bool]$liveReleaseJson.isDraft
             } else {
               $liveTagFailureText = "$liveTagViewResult"
             }
           } catch {
             $liveTagFailureText = "$_"
           }
-          if (-not $liveTagExists -and $liveTagFailureText -notmatch 'release not found') {
+          if (-not $liveReleaseExists -and $liveTagFailureText -notmatch 'release not found') {
             Write-Error "Publish failed: gh release view for $liveTag failed unexpectedly (not a plain not-found) -- $liveTagFailureText"
             exit 1
           }
-          if ($liveTagExists) {
+          if ($liveReleaseExists -and -not $liveReleaseIsDraft) {
             $tag = $candidateTag
             $candidateTagExists = $false
             $candidateTagFailureText = ''
@@ -1727,16 +1751,32 @@ jobs:
                 exit $LASTEXITCODE
               }
             } else {
-              $notes = "Built by Ruby4Lich5, commit $sha. Candidate for promotion to $liveTag -- review and test before promoting (gh release upload $liveTag $zipName --clobber). Single current artifact, overwritten in place on rebuild -- verify by SHA-256 digest, not by trusting the tag alone."
+              $notes = "Built by Ruby4Lich5, commit $sha. Candidate for promotion to $liveTag -- review and test before promoting. A matching gem recovery manifest (manifest.json) is attached to this same candidate release -- promotion must move both together, not the zip alone: (1) gh release download $tag --pattern '*.zip' --pattern manifest.json --dir . ; (2) gh release upload $liveTag R4L5-gem-bundle-$platform.zip --clobber ; (3) ruby bin/retarget_gem_manifest.rb manifest.json $tag $liveTag manifest.json ; (4) gh release upload $liveTag manifest.json --clobber. Single current artifact, overwritten in place on rebuild -- verify by SHA-256 digest, not by trusting the tag alone."
               gh release create $tag $zipPath --title "Gem bundle candidate ($platform)" --notes $notes --target $sha --prerelease
               if ($LASTEXITCODE -ne 0) {
                 Write-Error "Publish failed: gh release create failed for $tag."
                 exit $LASTEXITCODE
               }
             }
+          } elseif ($liveReleaseExists -and $liveReleaseIsDraft) {
+            # A prior run already created the live tag as a draft and no
+            # human has promoted it yet -- update that same draft in place
+            # rather than spinning off a candidate against unreviewed
+            # content.
+            $tag = $liveTag
+            gh release upload $tag $zipPath --clobber
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Publish failed: gh release upload --clobber failed for $tag."
+              exit $LASTEXITCODE
+            }
+            gh release edit $tag --target $sha
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Publish failed: could not update target commitish for $tag."
+              exit $LASTEXITCODE
+            }
           } else {
             $tag = $liveTag
-            $notes = "Built by Ruby4Lich5, commit $sha. Draft -- review and test before publishing (gh release edit $liveTag --draft=false). Single current artifact, overwritten in place on rebuild, not an incrementing version -- verify by SHA-256 digest, not by trusting the tag alone."
+            $notes = "Built by Ruby4Lich5, commit $sha. Draft -- review and test before publishing. A matching gem recovery manifest (manifest.json) is attached to this same draft release, already correctly tagged (draft and live share one tag name, only the draft flag changes on promotion, so no manifest retargeting is needed here) -- promote both together: (1) gh release edit $liveTag --draft=false. Single current artifact, overwritten in place on rebuild, not an incrementing version -- verify by SHA-256 digest, not by trusting the tag alone."
             gh release create $tag $zipPath --title "Gem bundle ($platform)" --notes $notes --target $sha --draft
             if ($LASTEXITCODE -ne 0) {
               Write-Error "Publish failed: gh release create failed for $tag."
@@ -1795,3 +1835,87 @@ jobs:
             exit 1
           }
           Write-Host "Published $tag (sha256:$localSha, commit $sha)"
+
+          # Consumed by "Generate gem recovery manifest" below -- this run's
+          # own tag/asset, whichever of the three branches above actually
+          # ran (live-draft-in-progress, brand-new draft, or candidate).
+          # Real design fix, review 2026-07-10: a manifest generated from a
+          # candidate's own staging set must be *tagged* as belonging to
+          # that candidate, not to a separately-fetched "live" snapshot --
+          # otherwise its package list (this run's dist/pkg) and its own
+          # artifact reference (a different run's zip) can describe two
+          # different sets of bytes. Every run now generates and uploads a
+          # manifest matching its own exact tag/staging set, always,
+          # unconditionally -- promotion (documented in this release's own
+          # notes above) is what makes one of them authoritative, not
+          # generation-time gating.
+          "BUNDLE_TAG=$tag" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "BUNDLE_ZIP_NAME=$zipName" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "BUNDLE_SHA256=sha256:$localSha" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Reads the closure actually staged in dist/pkg (via staged .gem
+      # files, not a live install registry this job never has), the
+      # already-published digests from the individual-gem publish step
+      # above, and this run's own just-published bundle tag/digest --
+      # never a separately-fetched value, so the package list and the
+      # artifact it's said to live inside always describe the same staging
+      # set (docs/DECISIONS.md Phase 13 SS2/SS3, Phase 14 addendum). Runs
+      # unconditionally, every publish, tagged to match whatever this run
+      # itself produced -- see "BUNDLE_TAG" above for why.
+      - name: Generate gem recovery manifest
+        shell: powershell
+        run: |
+          $pkgDir = Join-Path $env:GITHUB_WORKSPACE 'dist\pkg'
+          $rubyAbi = ($env:RUBY_INSTALLER_VERSION -replace '^(\d+\.\d+)\..*$', '$1')
+          $nativeNames = ($env:NATIVE_RUNTIME_GEMS -split '[,\s]+') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          $pureNames = ($env:RUNTIME_GEMS -split '[,\s]+') |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $nativeNames -notcontains $_ }
+          # Named "manifest.json" here, not "R4L5-gem-manifest.json" -- real
+          # release-blocking bug, found in review 2026-07-11: gh release
+          # upload names the remote asset after the *local file's own
+          # basename* with no #label override, and this release's own notes
+          # (above) document the promotion procedure entirely in terms of
+          # "manifest.json" (gh release download ... --pattern manifest.json,
+          # ruby bin/retarget_gem_manifest.rb manifest.json ...). A
+          # differently-named local file would silently break every one of
+          # those documented commands at the first step.
+          $outPath = Join-Path $env:RUNNER_TEMP 'manifest.json'
+
+          & ruby (Join-Path $env:GITHUB_WORKSPACE 'bin\generate_gem_manifest.rb') `
+            ($nativeNames -join ',') ($pureNames -join ',') $rubyAbi $env:GEM_PLATFORM $env:GH_REPO `
+            $env:BUNDLE_TAG $env:BUNDLE_ZIP_NAME $env:BUNDLE_SHA256 $pkgDir $outPath
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Gem manifest generation failed (exit $LASTEXITCODE) -- see output above."
+            exit $LASTEXITCODE
+          }
+
+          # Same independently-scoped --clobber already proven safe for
+          # this exact tag (docs/DECISIONS.md Phase 12 SS1): only touches
+          # the manifest.json asset, never the zip. Uploaded to *this run's
+          # own* tag (draft or candidate), never straight to the live tag --
+          # promotion (see this release's own notes) is the only thing that
+          # makes a manifest authoritative.
+          gh release upload $env:BUNDLE_TAG $outPath --clobber
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Publishing the gem recovery manifest failed."
+            exit $LASTEXITCODE
+          }
+
+          # Regression check, added alongside the filename fix above: this
+          # release's own notes are only correct if the uploaded asset is
+          # genuinely reachable by the exact name they document. Confirms
+          # it directly against the real release rather than trusting the
+          # upload's own exit code alone -- a clobber that silently uploaded
+          # under an unexpected name would otherwise go unnoticed until a
+          # real promotion attempt failed on it.
+          $manifestAssetCheck = gh release view $env:BUNDLE_TAG --json assets 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Could not verify the manifest.json asset after upload -- $manifestAssetCheck"
+            exit 1
+          }
+          $manifestAssetJson = $manifestAssetCheck | ConvertFrom-Json
+          if (-not ($manifestAssetJson.assets | Where-Object { $_.name -eq 'manifest.json' })) {
+            Write-Error "Publish failed: no asset literally named 'manifest.json' found on $($env:BUNDLE_TAG) after upload -- the documented promotion commands in this release's own notes would not find it."
+            exit 1
+          }
+          Write-Host "Published gem recovery manifest to $($env:BUNDLE_TAG) (verified as manifest.json)"
