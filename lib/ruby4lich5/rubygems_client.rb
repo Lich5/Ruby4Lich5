@@ -46,6 +46,44 @@ module Ruby4Lich5
       raise RequestError, "malformed versions response for #{gem_name}: #{e.message}"
     end
 
+    # The real, non-prerelease, +Gem::Version+-maximal published version --
+    # per docs/DECISIONS.md Phase 17 SS8's "latest defined precisely," used
+    # to pin an ordinary root's exact version before {#versions} is fed into
+    # +ClosureResolver#resolve_closure+ (which requires an exact version,
+    # never "whatever's current"). Never a string sort -- +"9.0" < "10.0"+
+    # lexically, but not by real semver.
+    #
+    # Formalized here, found in review: this exact logic already existed,
+    # copy-pasted ad hoc inside +bin/derive_curated_gems_seed.rb+, with zero
+    # dedicated unit coverage of its own -- only ever exercised indirectly
+    # through a real, live derivation run. A single version number can
+    # appear more than once in {#versions}' raw response, once per
+    # platform-specific artifact published for it (a pure gem's every entry
+    # shares one +"ruby"+ platform; a native gem may publish +"ruby"+
+    # *and* a target-platform build for the same number) -- +Gem::Version+
+    # comparison across however many duplicate-by-number entries exist
+    # still correctly finds the true maximum either way, so no separate
+    # platform-aware branch is needed here.
+    #
+    # @param gem_name [String]
+    # @return [String] the selected version number
+    # @raise [ArgumentError] if +gem_name+ is missing or contains unsafe
+    #   characters
+    # @raise [RequestError] if no non-prerelease version is published at
+    #   all, or any entry's +"number"+ field is malformed
+    def latest_version(gem_name)
+      entries = versions(gem_name)
+      entries.each { |v| validate_version_number!(v, gem_name) }
+
+      candidate = entries
+                  .reject { |v| Gem::Version.new(v.fetch('number')).prerelease? }
+                  .map { |v| Gem::Version.new(v.fetch('number')) }
+                  .max
+      raise RequestError, "no non-prerelease version found for #{gem_name}" if candidate.nil?
+
+      candidate.to_s
+    end
+
     # Builds the exact asset filename rubygems.org publishes for a gem
     # version and platform -- the single source of truth for this naming
     # rule. {#download_gem} calls this internally; callers that need to know
@@ -106,6 +144,24 @@ module Ruby4Lich5
       return if Gem::Version.correct?(version)
 
       raise ArgumentError, "version is not a valid RubyGems version: #{version.inspect}"
+    end
+
+    # @param entry [Hash] one raw {#versions} response entry
+    # @param gem_name [String] used only in the raised error message
+    # @raise [RequestError] if +entry['number']+ isn't a real, non-blank
+    #   RubyGems version string -- real gap, found in review:
+    #   +Gem::Version.new+ silently coerces +nil+/+""+ to +"0"+ and an
+    #   Integer like +7+ to +"7"+ rather than raising, the exact same
+    #   "correct? treats blank as valid" trap {#validate_version!}'s own
+    #   doc comment already names for a different call path. Confirmed
+    #   live: an upstream +{"number":null,...}+ or +{"number":"",...}+
+    #   entry was silently treated as a real, selectable version +"0"+
+    #   instead of being rejected as malformed.
+    def validate_version_number!(entry, gem_name)
+      number = entry['number']
+      return if number.is_a?(String) && !number.strip.empty? && Gem::Version.correct?(number)
+
+      raise RequestError, "malformed version number in versions response for #{gem_name}: #{number.inspect}"
     end
 
     # @param parsed [Object] the result of +JSON.parse+ on a versions response

@@ -86,6 +86,96 @@ RSpec.describe Ruby4Lich5::RubygemsClient do
     end
   end
 
+  describe '#latest_version' do
+    # Real gap, found in review: this exact selection logic previously only
+    # existed copy-pasted inline in bin/derive_curated_gems_seed.rb, never
+    # unit-tested on its own -- only ever exercised indirectly via a real,
+    # live derivation run. These three shapes are the real ones Phase 17
+    # SS14's acceptance matrix calls out by name.
+    it 'picks the real Gem::Version-maximal non-prerelease version for a pure gem (every entry platform: "ruby")' do
+      body = '[{"number":"2.0.0","platform":"ruby"},{"number":"1.9.0","platform":"ruby"},' \
+             '{"number":"2.1.0.pre1","platform":"ruby"}]'
+      client = described_class.new(http_get: ->(_uri) { body })
+
+      expect(client.latest_version('kramdown')).to eq('2.0.0')
+    end
+
+    it 'picks the real maximal version for a native gem that has a matching target-platform build' do
+      # Same version number published twice, once per platform -- the
+      # maximum must still resolve correctly across the duplicate-by-number
+      # entries, not be thrown off by there being more than one entry for
+      # the winning version.
+      body = '[{"number":"1.7.3","platform":"ruby"},{"number":"1.7.3","platform":"x64-mingw-ucrt"},' \
+             '{"number":"1.6.0","platform":"ruby"},{"number":"1.6.0","platform":"x64-mingw-ucrt"}]'
+      client = described_class.new(http_get: ->(_uri) { body })
+
+      expect(client.latest_version('sqlite3')).to eq('1.7.3')
+    end
+
+    it 'picks the real maximal version for a source-only native gem with no precompiled target-platform build at all' do
+      # Structurally identical to the pure-gem shape (every entry is
+      # platform: "ruby") -- the distinction between "pure" and
+      # "source-only native, self-build required" is a Classifier-time
+      # concern (does the source gem declare native extensions?), not
+      # something #latest_version's own version-number selection needs to
+      # know or differentiate.
+      body = '[{"number":"3.5.6","platform":"ruby"},{"number":"3.4.0","platform":"ruby"}]'
+      client = described_class.new(http_get: ->(_uri) { body })
+
+      expect(client.latest_version('gobject-introspection')).to eq('3.5.6')
+    end
+
+    it 'never picks by string comparison -- a real Gem::Version-maximal result, not a lexical one' do
+      # "9.0" > "10.0" lexically but not by real semver -- proves a naive
+      # string sort would have picked the wrong one here.
+      body = '[{"number":"9.0.0","platform":"ruby"},{"number":"10.0.0","platform":"ruby"}]'
+      client = described_class.new(http_get: ->(_uri) { body })
+
+      expect(client.latest_version('widget')).to eq('10.0.0')
+    end
+
+    it 'excludes a prerelease-only latest number, falling back to the real latest non-prerelease' do
+      body = '[{"number":"2.0.0.pre1","platform":"ruby"},{"number":"1.9.0","platform":"ruby"}]'
+      client = described_class.new(http_get: ->(_uri) { body })
+
+      expect(client.latest_version('widget')).to eq('1.9.0')
+    end
+
+    it 'raises RequestError when every published version is a prerelease' do
+      body = '[{"number":"2.0.0.pre1","platform":"ruby"}]'
+      client = described_class.new(http_get: ->(_uri) { body })
+
+      expect { client.latest_version('widget') }
+        .to raise_error(described_class::RequestError, /no non-prerelease version found for widget/)
+    end
+
+    describe 'malformed version numbers, found in review -- Gem::Version.new silently coerces these instead of raising' do
+      it 'rejects a null "number" field rather than silently treating it as version "0"' do
+        body = '[{"number":null,"platform":"ruby"}]'
+        client = described_class.new(http_get: ->(_uri) { body })
+
+        expect { client.latest_version('widget') }
+          .to raise_error(described_class::RequestError, /malformed version number in versions response for widget/)
+      end
+
+      it 'rejects an empty-string "number" field rather than silently treating it as version "0"' do
+        body = '[{"number":"","platform":"ruby"}]'
+        client = described_class.new(http_get: ->(_uri) { body })
+
+        expect { client.latest_version('widget') }
+          .to raise_error(described_class::RequestError, /malformed version number in versions response for widget/)
+      end
+
+      it 'rejects an Integer "number" field rather than silently coercing it (7 -> "7")' do
+        body = '[{"number":7,"platform":"ruby"}]'
+        client = described_class.new(http_get: ->(_uri) { body })
+
+        expect { client.latest_version('widget') }
+          .to raise_error(described_class::RequestError, /malformed version number in versions response for widget/)
+      end
+    end
+  end
+
   describe '#asset_filename' do
     it 'omits the platform segment for the ruby-platform source gem' do
       client = described_class.new(http_get: unused_http_get)

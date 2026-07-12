@@ -121,21 +121,11 @@ output_json_path = ARGV.first || File.expand_path('../config/curated-gems.json',
 
 rubygems_client = Ruby4Lich5::RubygemsClient.new
 
-# @return [String] the real, non-prerelease, Gem::Version-maximal published
-#   version for +gem_name+
-def latest_version(rubygems_client, gem_name)
-  versions = rubygems_client.versions(gem_name)
-  candidate = versions
-              .reject { |v| Gem::Version.new(v['number']).prerelease? }
-              .map { |v| Gem::Version.new(v['number']) }
-              .max
-  raise "no non-prerelease version found for #{gem_name}" if candidate.nil?
-
-  candidate.to_s
-end
-
+# Real single-source-of-truth fix, PR D: this "latest" selection logic used
+# to be a local, untested duplicate here -- formalized and unit-tested on
+# RubygemsClient itself instead (see its own #latest_version doc comment).
 roots = { 'gtk3' => GTK3_VERSION }
-RUNTIME_GEMS.each { |name| roots[name] = latest_version(rubygems_client, name) }
+RUNTIME_GEMS.each { |name| roots[name] = rubygems_client.latest_version(name) }
 
 puts 'Resolving roots:'
 roots.each { |name, version| puts "  #{name} #{version}" }
