@@ -68,6 +68,13 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
 
+    # Handed to the smoke job below so it can verify its own independently
+    # downloaded RubyInstaller archive against the exact same digest this
+    # job already resolved, without needing a GH_TOKEN of its own.
+    outputs:
+      ruby-archive-url: ${{ steps.ruby-digest.outputs.url }}
+      ruby-archive-digest: ${{ steps.ruby-digest.outputs.digest }}
+
     env:
       MSYSTEM: UCRT64
       MSYS2_PREFIX: ucrt64
@@ -77,6 +84,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Validate inputs
         shell: powershell
@@ -265,24 +274,87 @@ jobs:
           & $pkgConfig --modversion gtk+-3.0 gobject-introspection-1.0 glib-2.0 gobject-2.0 gio-2.0 cairo pango
           Write-Host "::endgroup::"
 
+      # GH_TOKEN scoped to just this step -- every step after it executes
+      # externally sourced code (the downloaded RubyInstaller archive, then
+      # native-gem build/install hooks) and has no business holding a
+      # repo-scoped token while doing it. Same convention as
+      # build-ruby4lich5-installer.yaml's "Resolve latest RubyInstaller in
+      # series" step and validate-novel-gem.yml's own digest-resolution step.
+      # Also exposed as a job output (below) -- the smoke job, downstream,
+      # deliberately runs with no GH_TOKEN at all (real security design,
+      # see that job's own comment), so it can't re-resolve this digest via
+      # `gh api` itself. Resolving it once, here, and handing the exact
+      # value forward for a purely local Get-FileHash comparison there is
+      # what lets both jobs verify the same archive without giving the
+      # untrusted-code-execution job a token it has no business holding.
+      - name: Resolve RubyInstaller release digest
+        id: ruby-digest
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION
+          $tag = "RubyInstaller-$rubyInstallerVersion"
+          $archiveName = "rubyinstaller-$rubyInstallerVersion-x64.7z"
+
+          # Output captured and $LASTEXITCODE checked immediately, parsed only
+          # on success -- same fix already established later in this file
+          # (the gem-bundle digest-retry loop, 2026-07-09): piping `gh api`
+          # straight into ConvertFrom-Json would make a genuine command
+          # failure (auth/network/rate-limit) look like a JSON parse error
+          # instead of surfacing the real `gh` error text.
+          $apiOutput = gh api "repos/oneclick/rubyinstaller2/releases/tags/$tag" 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "gh api failed for release $tag -- $apiOutput"
+            exit 1
+          }
+          $rel = $apiOutput | ConvertFrom-Json
+          $asset = $rel.assets | Where-Object { $_.name -eq $archiveName }
+          if (-not $asset) {
+            Write-Error "Asset $archiveName not found on release $tag."
+            exit 1
+          }
+          # RubyInstaller's own releases report a real sha256 digest per
+          # asset (same GitHub Releases API field build-ruby4lich5-installer.yaml
+          # and validate-novel-gem.yml already trust for this same third
+          # party) -- captured here, verified after download in the next
+          # step, so a compromised or corrupted mirror is caught before 7z
+          # or ruby.exe ever touch it.
+          if ($asset.digest -notmatch '^sha256:[0-9a-f]{64}$') {
+            Write-Error "RubyInstaller release $tag returned a missing or malformed digest for $archiveName -- got '$($asset.digest)'."
+            exit 1
+          }
+
+          "RUBY_ARCHIVE_URL=$($asset.browser_download_url)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RUBY_ARCHIVE_DIGEST=$($asset.digest)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "url=$($asset.browser_download_url)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "digest=$($asset.digest)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "RubyInstaller $tag -> $archiveName (sha256 recorded: $($asset.digest))"
+
       - name: Download and extract RubyInstaller
         shell: powershell
         run: |
           $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION
           $rubyParent = 'C:\Ruby4Lich5\ruby'
           $archive = Join-Path $env:RUNNER_TEMP "rubyinstaller-$rubyInstallerVersion-x64.7z"
-          $url = "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-$rubyInstallerVersion/rubyinstaller-$rubyInstallerVersion-x64.7z"
 
           if (Test-Path $rubyParent) {
             Remove-Item $rubyParent -Recurse -Force
           }
           New-Item -ItemType Directory -Path $rubyParent -Force | Out-Null
 
-          Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing -TimeoutSec 60
+          Invoke-WebRequest -Uri $env:RUBY_ARCHIVE_URL -OutFile $archive -UseBasicParsing -TimeoutSec 60
           if (!(Test-Path $archive)) {
             Write-Error "RubyInstaller download failed: expected archive $archive was not created."
             exit 1
           }
+
+          $localDigest = "sha256:" + (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($localDigest -ne $env:RUBY_ARCHIVE_DIGEST) {
+            Write-Error "RubyInstaller download digest mismatch -- expected $env:RUBY_ARCHIVE_DIGEST, got $localDigest. Refusing to extract or run it."
+            exit 1
+          }
+          Write-Host "RubyInstaller archive digest verified: $localDigest"
 
           $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
           if (!(Test-Path $sevenZip)) {
@@ -1223,6 +1295,8 @@ jobs:
     # with its own narrowly-scoped token -- real finding, fixed 2026-07-09.
     env:
       RUBY_INSTALLER_VERSION: ${{ inputs.ruby-installer-version }}
+      RUBY_ARCHIVE_URL: ${{ needs.build_ruby4_bundled_gems_suite.outputs.ruby-archive-url }}
+      RUBY_ARCHIVE_DIGEST: ${{ needs.build_ruby4_bundled_gems_suite.outputs.ruby-archive-digest }}
       PKG_DIR: ${{ github.workspace }}\pkg
 
     steps:
@@ -1247,14 +1321,30 @@ jobs:
           # unlike when this step ran in the same job as the initial RubyInstaller
           # download, there is nothing already cached at $env:RUNNER_TEMP to
           # extract -- download it directly instead.
+          #
+          # No GH_TOKEN in this job (see the job-level comment above), so this
+          # can't re-resolve the release digest itself via `gh api` -- it
+          # reuses the exact digest the build job already resolved (passed
+          # forward as a job output) and does a purely local verification.
+          if ([string]::IsNullOrWhiteSpace($env:RUBY_ARCHIVE_URL) -or [string]::IsNullOrWhiteSpace($env:RUBY_ARCHIVE_DIGEST)) {
+            Write-Error "Clean packaged smoke failed: RUBY_ARCHIVE_URL/RUBY_ARCHIVE_DIGEST were not passed from the build job."
+            exit 1
+          }
+
           $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION
           $archive = Join-Path $env:RUNNER_TEMP "rubyinstaller-$rubyInstallerVersion-x64.7z"
-          $url = "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-$rubyInstallerVersion/rubyinstaller-$rubyInstallerVersion-x64.7z"
-          Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing -TimeoutSec 60
+          Invoke-WebRequest -Uri $env:RUBY_ARCHIVE_URL -OutFile $archive -UseBasicParsing -TimeoutSec 60
           if (!(Test-Path $archive)) {
             Write-Error "Clean packaged smoke failed: RubyInstaller download failed; expected archive $archive was not created."
             exit 1
           }
+
+          $localDigest = "sha256:" + (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($localDigest -ne $env:RUBY_ARCHIVE_DIGEST) {
+            Write-Error "Clean packaged smoke failed: RubyInstaller download digest mismatch -- expected $env:RUBY_ARCHIVE_DIGEST, got $localDigest. Refusing to extract or run it."
+            exit 1
+          }
+          Write-Host "RubyInstaller archive digest verified: $localDigest"
 
           $smokeParent = 'C:\Ruby4Lich5\clean-smoke-ruby'
           if (Test-Path $smokeParent) {
