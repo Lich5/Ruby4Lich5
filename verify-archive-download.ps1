@@ -47,27 +47,32 @@ function Invoke-VerifiedDownload {
     throw "ExpectedDigest is missing or malformed -- got '$ExpectedDigest'."
   }
 
-  # Whole download+verify sequence wrapped in one try/catch -- Invoke-WebRequest
-  # -OutFile streams to disk incrementally, not atomically, so a timeout or
-  # dropped connection mid-transfer can leave a truncated file at
-  # $DestinationPath even though Invoke-WebRequest itself throws rather than
-  # returning. A throw from Invoke-WebRequest would otherwise propagate
-  # straight past cleanup, leaving that partial file behind -- real gap,
-  # found in review 2026-07-12: only the digest-mismatch path used to clean
-  # up. Every failure path here now funnels through the same cleanup before
-  # re-throwing the original exception.
+  # Downloads to a staging file, never $DestinationPath directly, and only
+  # moves it into place after verification succeeds -- real gap, found in
+  # review 2026-07-12: Invoke-WebRequest -OutFile writes straight to
+  # $DestinationPath, so any failure (transport error, digest mismatch)
+  # would truncate or destroy whatever was already there before this
+  # function's own cleanup ever ran. A caller with something already valid
+  # at $DestinationPath must see it survive a failed re-verify attempt
+  # untouched, not just get the same treatment as a bad download. The
+  # staging file lives alongside $DestinationPath (same volume, so the
+  # final move is a real rename, not a cross-volume copy) and is the only
+  # thing ever deleted on failure.
+  $stagingPath = "$DestinationPath.download-$([guid]::NewGuid().ToString('N'))"
   try {
-    Invoke-WebRequest -Uri $Url -OutFile $DestinationPath -UseBasicParsing -TimeoutSec $TimeoutSec
-    if (!(Test-Path $DestinationPath)) {
-      throw "Download failed: expected file $DestinationPath was not created."
+    Invoke-WebRequest -Uri $Url -OutFile $stagingPath -UseBasicParsing -TimeoutSec $TimeoutSec
+    if (!(Test-Path $stagingPath)) {
+      throw "Download failed: expected file $stagingPath was not created."
     }
 
-    $localDigest = "sha256:" + (Get-FileHash -Path $DestinationPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $localDigest = "sha256:" + (Get-FileHash -Path $stagingPath -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($localDigest -ne $ExpectedDigest) {
       throw "Digest mismatch for $DestinationPath -- expected $ExpectedDigest, got $localDigest. Refusing to trust this download."
     }
+
+    Move-Item -Path $stagingPath -Destination $DestinationPath -Force
   } catch {
-    Remove-Item $DestinationPath -Force -ErrorAction SilentlyContinue
+    Remove-Item $stagingPath -Force -ErrorAction SilentlyContinue
     throw
   }
 

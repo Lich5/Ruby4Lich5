@@ -6,6 +6,12 @@
 /pkg/
 /spec/reports/
 /spec/examples.txt
+
+# Pester's own default NUnit-format test-result output, written to the repo
+# root by Invoke-Pester unless $config.TestResult.Enabled is explicitly set
+# to $false -- a local run byproduct, not something to commit. Real gap
+# found in review 2026-07-12: it landed in a real commit on this branch.
+/testResults.xml
 /test/tmp/
 /test/version_tmp/
 /tmp/
