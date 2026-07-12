@@ -4,22 +4,13 @@ require 'ruby4lich5/registry_policy_gate'
 require 'ruby4lich5/resolution_lock'
 require 'ruby4lich5/curated_gem_registry'
 require 'ruby4lich5/classification'
+require_relative '../support/closure_fixtures'
 
 RSpec.describe Ruby4Lich5::RegistryPolicyGate do
+  include ClosureFixtures
+
   let(:valid_commit_sha) { 'a' * 40 }
   let(:valid_digest) { "sha256:#{'b' * 64}" }
-
-  def classification(state, **overrides)
-    Ruby4Lich5::Classification.new(state: state, gem_name: 'unused', gem_version: '1.0.0', reason: 'test', **overrides)
-  end
-
-  def closure_entry(name, version, state: :pure, deps: [], **classification_overrides)
-    {
-      name: name, version: version,
-      runtime_dependencies: deps.map { |dep_name, req| { name: dep_name, requirement: Gem::Requirement.new(req || '>= 0') } },
-      classification: classification(state, **classification_overrides)
-    }
-  end
 
   # Defaults to the exact identity `lock` below defaults to, so most tests
   # describe the gate being given the right registry -- tests that need a

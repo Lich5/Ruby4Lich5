@@ -3,19 +3,10 @@
 require 'ruby4lich5/staged_closure_revalidator'
 require 'ruby4lich5/resolution_lock'
 require 'ruby4lich5/classification'
+require_relative '../support/closure_fixtures'
 
 RSpec.describe Ruby4Lich5::StagedClosureRevalidator do
-  def classification(state, **overrides)
-    Ruby4Lich5::Classification.new(state: state, gem_name: 'unused', gem_version: '1.0.0', reason: 'test', **overrides)
-  end
-
-  def closure_entry(name, version, state: :pure, deps: [], **classification_overrides)
-    {
-      name: name, version: version,
-      runtime_dependencies: deps.map { |dep_name, req| { name: dep_name, requirement: Gem::Requirement.new(req || '>= 0') } },
-      classification: classification(state, **classification_overrides)
-    }
-  end
+  include ClosureFixtures
 
   def lock(closure:, requested_roots: nil)
     requested_roots ||= { closure.first.fetch(:name) => closure.first.fetch(:version) }
