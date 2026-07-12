@@ -76,8 +76,8 @@ module Ruby4Lich5
       entries.each { |v| validate_version_number!(v, gem_name) }
 
       candidate = entries
-                  .reject { |v| Gem::Version.new(v.fetch('number')).prerelease? }
                   .map { |v| Gem::Version.new(v.fetch('number')) }
+                  .reject(&:prerelease?)
                   .max
       raise RequestError, "no non-prerelease version found for #{gem_name}" if candidate.nil?
 
