@@ -1,0 +1,38 @@
+{
+  "derived_at": "2026-07-12",
+  "derived_by": "bin/derive_curated_gems_seed.rb",
+  "platform": "x64-mingw-ucrt",
+  "ruby_abi": "4.0",
+  "roots": {
+    "gtk3": "4.3.6",
+    "sqlite3": "2.9.5",
+    "ox": "2.14.28",
+    "ascii_charts": "0.9.1",
+    "curses": "1.6.0",
+    "os": "1.1.4",
+    "redis": "5.4.1",
+    "sequel": "5.106.0",
+    "terminal-table": "4.0.0",
+    "kramdown": "2.5.2",
+    "tzinfo": "2.0.6",
+    "tzinfo-data": "1.2026.3",
+    "concurrent-ruby": "1.3.7",
+    "ffi": "1.17.4",
+    "webrick": "1.9.2"
+  },
+  "msys2_packages": [
+    "mingw-w64-ucrt-x86_64-gobject-introspection",
+    "mingw-w64-ucrt-x86_64-gobject-introspection-runtime",
+    "mingw-w64-ucrt-x86_64-gtk3",
+    "mingw-w64-ucrt-x86_64-pdcurses",
+    "mingw-w64-ucrt-x86_64-ncurses"
+  ],
+  "notes": [
+    "gtk3's version is ruby4-bundled-gems-suite.yml's ruby-gnome-version default, not a live RubyGems.org lookup.",
+    "Every other root is the real non-prerelease Gem::Version-maximal published version at derivation time, matching ruby4-bundled-gems-suite.yml's full runtime-gems default list (not just native-runtime-gems -- an earlier derivation run only covered the four native-runtime-gems roots, missing every pure runtime-gems default; corrected after diffing against manifest/R4L5-gem-manifest.json's real 31 shipped members).",
+    "Real finding this run: sqlite3 and ffi classify as native_pass_through, not native_self_contained as KnownNativeGems::KNOWN_GEMS previously assumed -- upstream now ships precompiled x64-mingw-ucrt builds matching Ruby 4.0's ABI. Confirmed by source trace: today's real runtime-bundle path already only repacks ox/curses through the classified GTK flow.",
+    "Equivalence checked directly against manifest/R4L5-gem-manifest.json: every one of its 31 real members, minus matrix/rexml (both RubyBundledGems.bundled? today), has an approval: approved entry in the resulting seed. Two extra approved gems beyond the manifest's own members (pkg-config, native-package-installer) are real build-time-only transitive dependencies of the gtk3 closure, not part of the shipped runtime bundle -- expected, not a gap.",
+    "msys2_packages is the legacy uniform GTK3/curses recipe (bin/derive_curated_gems_seed.rb's LEGACY_UNIFORM_GTK3_CURSES_PACKAGES), applied to all 12 native_self_contained entries -- static toolchain (Msys2Bootstrap::PACKAGES) and the stale mingw-w64-ucrt-x86_64-sqlite3 pin already removed, but this remaining 5-package list is still uniform across gems, not evidence-backed per-gem curation -- explicitly transitional, real decomposition deliberately deferred.",
+    "config/curated-gems.json's gem entries are sorted by name (CuratedGemsSeedBuilder#build), not root_plans insertion order -- real reproducibility fix, found in CodeRabbit review 2026-07-13: insertion-order-dependent JSON serialization would have broken exact content_digest reproducibility for logically-identical derivation runs."
+  ]
+}

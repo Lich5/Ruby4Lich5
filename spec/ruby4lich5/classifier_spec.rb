@@ -91,33 +91,46 @@ RSpec.describe Ruby4Lich5::Classifier do
 
         result = classifier.classify(name: 'gtk3', version: '4.3.7', platform: 'x64-mingw-ucrt', ruby_abi: '4.0')
 
+        # Asserts Classifier correctly wires KnownNativeGems' own answer
+        # into the result, not a hardcoded literal package list -- since
+        # PR B's facade cutover, KnownNativeGems reads the real, reviewable
+        # config/curated-gems.json rather than an in-code constant, and a
+        # future curation change there shouldn't have to touch this spec.
         expect(result.self_contained?).to be(true)
-        expect(result.msys2_packages).to eq(Ruby4Lich5::KnownNativeGems::MSYS2_PACKAGES)
+        expect(result.msys2_packages).to eq(Ruby4Lich5::KnownNativeGems.packages_for('gtk3'))
+        expect(result.msys2_packages).not_to be_empty
       end
     end
 
     context 'when upstream has a build for the platform but not the requested ABI' do
       it 'does not substitute a different version, and falls through to self-build' do
-        ruby_path = download_path('sqlite3', '1.7.3', 'ruby')
-        platform_path = download_path('sqlite3', '1.7.3', 'x64-mingw-ucrt')
+        # Uses 'curses', not 'sqlite3' -- a real finding during Item 28's PR B
+        # (2026-07-13): sqlite3 now classifies as native_pass_through in the
+        # real curated registry (upstream ships a matching precompiled
+        # build), so it's no longer a valid example of "falls through to
+        # self-build." 'curses' is still a real, current self-build
+        # candidate; this test is about the ABI-mismatch fallthrough
+        # behavior in general, not about sqlite3 specifically.
+        ruby_path = download_path('curses', '1.4.1', 'ruby')
+        platform_path = download_path('curses', '1.4.1', 'x64-mingw-ucrt')
         allow(rubygems_client).to receive(:download_gem)
-          .with('sqlite3', '1.7.3', platform: 'ruby').and_return(ruby_path)
+          .with('curses', '1.4.1', platform: 'ruby').and_return(ruby_path)
         allow(rubygems_client).to receive(:download_gem)
-          .with('sqlite3', '1.7.3', platform: 'x64-mingw-ucrt').and_return(platform_path)
-        allow(rubygems_client).to receive(:versions).with('sqlite3').and_return(
-          [{ 'number' => '1.7.3', 'platform' => 'x64-mingw-ucrt' }]
+          .with('curses', '1.4.1', platform: 'x64-mingw-ucrt').and_return(platform_path)
+        allow(rubygems_client).to receive(:versions).with('curses').and_return(
+          [{ 'number' => '1.4.1', 'platform' => 'x64-mingw-ucrt' }]
         )
         allow(rubygems_client).to receive(:asset_filename)
-          .with('sqlite3', '1.7.3', 'x64-mingw-ucrt').and_return('sqlite3-1.7.3-x64-mingw-ucrt.gem')
+          .with('curses', '1.4.1', 'x64-mingw-ucrt').and_return('curses-1.4.1-x64-mingw-ucrt.gem')
         inspector_class = fake_inspector_class(
           ruby_path     => { extensions?: true, abi_present?: false },
           platform_path => { extensions?: true, abi_present?: false }
         )
         classifier = described_class.new(rubygems_client: rubygems_client, gem_inspector_class: inspector_class)
 
-        result = classifier.classify(name: 'sqlite3', version: '1.7.3', platform: 'x64-mingw-ucrt', ruby_abi: '4.1')
+        result = classifier.classify(name: 'curses', version: '1.4.1', platform: 'x64-mingw-ucrt', ruby_abi: '4.1')
 
-        expect(result.gem_version).to eq('1.7.3')
+        expect(result.gem_version).to eq('1.4.1')
         expect(result.self_contained?).to be(true)
       end
     end

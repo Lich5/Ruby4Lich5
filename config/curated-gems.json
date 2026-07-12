@@ -1,0 +1,430 @@
+{
+  "schema": 2,
+  "gems": {
+    "ascii_charts": {
+      "approval": "approved",
+      "bundle_default": true,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    },
+    "atk": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "native_self_contained",
+            "msys2_packages": [
+              "mingw-w64-ucrt-x86_64-gobject-introspection",
+              "mingw-w64-ucrt-x86_64-gobject-introspection-runtime",
+              "mingw-w64-ucrt-x86_64-gtk3",
+              "mingw-w64-ucrt-x86_64-pdcurses",
+              "mingw-w64-ucrt-x86_64-ncurses"
+            ]
+          }
+        }
+      }
+    },
+    "cairo": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "native_self_contained",
+            "msys2_packages": [
+              "mingw-w64-ucrt-x86_64-gobject-introspection",
+              "mingw-w64-ucrt-x86_64-gobject-introspection-runtime",
+              "mingw-w64-ucrt-x86_64-gtk3",
+              "mingw-w64-ucrt-x86_64-pdcurses",
+              "mingw-w64-ucrt-x86_64-ncurses"
+            ]
+          }
+        }
+      }
+    },
+    "cairo-gobject": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "native_self_contained",
+            "msys2_packages": [
+              "mingw-w64-ucrt-x86_64-gobject-introspection",
+              "mingw-w64-ucrt-x86_64-gobject-introspection-runtime",
+              "mingw-w64-ucrt-x86_64-gtk3",
+              "mingw-w64-ucrt-x86_64-pdcurses",
+              "mingw-w64-ucrt-x86_64-ncurses"
+            ]
+          }
+        }
+      }
+    },
+    "concurrent-ruby": {
+      "approval": "approved",
+      "bundle_default": true,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    },
+    "connection_pool": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    },
+    "curses": {
+      "approval": "approved",
+      "bundle_default": true,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "native_self_contained",
+            "msys2_packages": [
+              "mingw-w64-ucrt-x86_64-gobject-introspection",
+              "mingw-w64-ucrt-x86_64-gobject-introspection-runtime",
+              "mingw-w64-ucrt-x86_64-gtk3",
+              "mingw-w64-ucrt-x86_64-pdcurses",
+              "mingw-w64-ucrt-x86_64-ncurses"
+            ]
+          }
+        }
+      }
+    },
+    "ffi": {
+      "approval": "approved",
+      "bundle_default": true,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "native_pass_through"
+          }
+        }
+      }
+    },
+    "gdk3": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "native_self_contained",
+            "msys2_packages": [
+              "mingw-w64-ucrt-x86_64-gobject-introspection",
+              "mingw-w64-ucrt-x86_64-gobject-introspection-runtime",
+              "mingw-w64-ucrt-x86_64-gtk3",
+              "mingw-w64-ucrt-x86_64-pdcurses",
+              "mingw-w64-ucrt-x86_64-ncurses"
+            ]
+          }
+        }
+      }
+    },
+    "gdk_pixbuf2": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "native_self_contained",
+            "msys2_packages": [
+              "mingw-w64-ucrt-x86_64-gobject-introspection",
+              "mingw-w64-ucrt-x86_64-gobject-introspection-runtime",
+              "mingw-w64-ucrt-x86_64-gtk3",
+              "mingw-w64-ucrt-x86_64-pdcurses",
+              "mingw-w64-ucrt-x86_64-ncurses"
+            ]
+          }
+        }
+      }
+    },
+    "gio2": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "native_self_contained",
+            "msys2_packages": [
+              "mingw-w64-ucrt-x86_64-gobject-introspection",
+              "mingw-w64-ucrt-x86_64-gobject-introspection-runtime",
+              "mingw-w64-ucrt-x86_64-gtk3",
+              "mingw-w64-ucrt-x86_64-pdcurses",
+              "mingw-w64-ucrt-x86_64-ncurses"
+            ]
+          }
+        }
+      }
+    },
+    "glib2": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "native_self_contained",
+            "msys2_packages": [
+              "mingw-w64-ucrt-x86_64-gobject-introspection",
+              "mingw-w64-ucrt-x86_64-gobject-introspection-runtime",
+              "mingw-w64-ucrt-x86_64-gtk3",
+              "mingw-w64-ucrt-x86_64-pdcurses",
+              "mingw-w64-ucrt-x86_64-ncurses"
+            ]
+          }
+        }
+      }
+    },
+    "gobject-introspection": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "native_self_contained",
+            "msys2_packages": [
+              "mingw-w64-ucrt-x86_64-gobject-introspection",
+              "mingw-w64-ucrt-x86_64-gobject-introspection-runtime",
+              "mingw-w64-ucrt-x86_64-gtk3",
+              "mingw-w64-ucrt-x86_64-pdcurses",
+              "mingw-w64-ucrt-x86_64-ncurses"
+            ]
+          }
+        }
+      }
+    },
+    "gtk3": {
+      "approval": "approved",
+      "bundle_default": true,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "native_self_contained",
+            "msys2_packages": [
+              "mingw-w64-ucrt-x86_64-gobject-introspection",
+              "mingw-w64-ucrt-x86_64-gobject-introspection-runtime",
+              "mingw-w64-ucrt-x86_64-gtk3",
+              "mingw-w64-ucrt-x86_64-pdcurses",
+              "mingw-w64-ucrt-x86_64-ncurses"
+            ]
+          }
+        }
+      }
+    },
+    "kramdown": {
+      "approval": "approved",
+      "bundle_default": true,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    },
+    "native-package-installer": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    },
+    "os": {
+      "approval": "approved",
+      "bundle_default": true,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    },
+    "ox": {
+      "approval": "approved",
+      "bundle_default": true,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "native_self_contained",
+            "msys2_packages": [
+              "mingw-w64-ucrt-x86_64-gobject-introspection",
+              "mingw-w64-ucrt-x86_64-gobject-introspection-runtime",
+              "mingw-w64-ucrt-x86_64-gtk3",
+              "mingw-w64-ucrt-x86_64-pdcurses",
+              "mingw-w64-ucrt-x86_64-ncurses"
+            ]
+          }
+        }
+      }
+    },
+    "pango": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "native_self_contained",
+            "msys2_packages": [
+              "mingw-w64-ucrt-x86_64-gobject-introspection",
+              "mingw-w64-ucrt-x86_64-gobject-introspection-runtime",
+              "mingw-w64-ucrt-x86_64-gtk3",
+              "mingw-w64-ucrt-x86_64-pdcurses",
+              "mingw-w64-ucrt-x86_64-ncurses"
+            ]
+          }
+        }
+      }
+    },
+    "pkg-config": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    },
+    "red-colors": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    },
+    "redis": {
+      "approval": "approved",
+      "bundle_default": true,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    },
+    "redis-client": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    },
+    "sequel": {
+      "approval": "approved",
+      "bundle_default": true,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    },
+    "sqlite3": {
+      "approval": "approved",
+      "bundle_default": true,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "native_pass_through"
+          }
+        }
+      }
+    },
+    "terminal-table": {
+      "approval": "approved",
+      "bundle_default": true,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    },
+    "tzinfo": {
+      "approval": "approved",
+      "bundle_default": true,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    },
+    "tzinfo-data": {
+      "approval": "approved",
+      "bundle_default": true,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    },
+    "unicode-display_width": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    },
+    "unicode-emoji": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    },
+    "webrick": {
+      "approval": "approved",
+      "bundle_default": true,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "pure"
+          }
+        }
+      }
+    }
+  }
+}
