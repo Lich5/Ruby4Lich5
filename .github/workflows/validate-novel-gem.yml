@@ -12,11 +12,6 @@
 # get checked against a real MSYS2 compile attempt instead of stopping at
 # the classify/plan layer, which is as far as local (non-Windows) testing
 # can ever reach on its own.
-#
-# Promoted from a throwaway harness (deleted 2026-07-07) per Doug's request
-# for "the formal production version of a like tool" -- see
-# results_claude/Ruby4Lich5/validate-novel-gem-findings-2026-07-07.md for the
-# three real runs/lessons this design already reflects.
 
 name: Validate novel gem
 
