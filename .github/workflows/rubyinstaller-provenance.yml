@@ -1,0 +1,152 @@
+# Non-publishing trust-anchor diagnostic for the RubyInstaller archive every
+# real workflow in this repo depends on -- exercises verify-archive-download.ps1
+# (the shared download-verify helper, docs/DECISIONS.md Phase 18) against a
+# real archive end to end: resolve, download, locally hash, verify, extract,
+# then confirm ruby.exe actually runs and reports the expected platform.
+#
+# Deliberately does not build gems, set up MSYS2, publish anything, or
+# mutate any artifact -- provenance only. Same "diagnostic, not part of the
+# real pipeline" spirit as validate-novel-gem.yml, but answers a different
+# question (is this exact archive what it claims to be, and does the
+# resulting Ruby actually work) rather than generic native-compile
+# viability -- deliberately not folded into that workflow (Phase 18's own
+# reasoning: that one requires MSYS2 and tests something else entirely,
+# which would make a trust-anchor check slower and conceptually muddier).
+
+name: RubyInstaller provenance diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      ruby-installer-version:
+        description: "RubyInstaller UCRT archive version, for example 4.0.5-1."
+        required: false
+        default: "4.0.5-1"
+
+permissions:
+  contents: read
+
+jobs:
+  verify_rubyinstaller_provenance:
+    name: Verify RubyInstaller provenance (windows-ucrt64)
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    env:
+      GEM_PLATFORM: x64-mingw-ucrt
+
+    steps:
+      # Needed only to reach verify-archive-download.ps1 -- this workflow
+      # otherwise runs no other repo-tooling code.
+      - name: Checkout repository (shared verified-download helper only)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            verify-archive-download.ps1
+          sparse-checkout-cone-mode: false
+
+      - name: Validate inputs
+        shell: powershell
+        env:
+          RUBY_INSTALLER_VERSION_INPUT: ${{ inputs.ruby-installer-version }}
+        run: |
+          # Read via $env:, not spliced directly into the script text as a quoted
+          # expression -- a single quote in a workflow_dispatch input could
+          # otherwise break out of the string and inject arbitrary PowerShell
+          # before any of the validation below ever runs.
+          $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION_INPUT
+          if ($rubyInstallerVersion -notmatch '^\d+\.\d+\.\d+-\d+$') {
+            Write-Error "ruby-installer-version must look like N.N.N-N, for example 4.0.5-1; received '$rubyInstallerVersion'."
+            exit 1
+          }
+          "RUBY_INSTALLER_VERSION=$rubyInstallerVersion" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # GH_TOKEN scoped to just this step -- every step after it either runs
+      # entirely locally (the shared helper's own download+hash) or executes
+      # externally sourced code (7z, then ruby.exe itself) and has no
+      # business holding a repo-scoped token while doing it.
+      - name: Resolve RubyInstaller release digest
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION
+          $tag = "RubyInstaller-$rubyInstallerVersion"
+          $archiveName = "rubyinstaller-$rubyInstallerVersion-x64.7z"
+
+          # Output captured and $LASTEXITCODE checked immediately, parsed
+          # only on success -- same fix already established elsewhere in
+          # this project (ruby4-bundled-gems-suite.yml, Item 29): piping
+          # `gh api` straight into ConvertFrom-Json would make a genuine
+          # command failure look like a JSON parse error instead of
+          # surfacing the real `gh` error text.
+          $apiOutput = gh api "repos/oneclick/rubyinstaller2/releases/tags/$tag" 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "gh api failed for release $tag -- $apiOutput"
+            exit 1
+          }
+          $rel = $apiOutput | ConvertFrom-Json
+          $asset = $rel.assets | Where-Object { $_.name -eq $archiveName }
+          if (-not $asset) {
+            Write-Error "Asset $archiveName not found on release $tag."
+            exit 1
+          }
+          if ($asset.digest -notmatch '^sha256:[0-9a-f]{64}$') {
+            Write-Error "RubyInstaller release $tag returned a missing or malformed digest for $archiveName -- got '$($asset.digest)'."
+            exit 1
+          }
+
+          "RUBY_ARCHIVE_URL=$($asset.browser_download_url)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RUBY_ARCHIVE_DIGEST=$($asset.digest)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "RubyInstaller $tag -> $archiveName (sha256 recorded: $($asset.digest))"
+
+      - name: Download, verify, and extract RubyInstaller
+        shell: powershell
+        run: |
+          $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION
+          $rubyParent = Join-Path $env:RUNNER_TEMP 'rubyinstaller-provenance'
+          $archive = Join-Path $env:RUNNER_TEMP "rubyinstaller-$rubyInstallerVersion-x64.7z"
+
+          New-Item -ItemType Directory -Path $rubyParent -Force | Out-Null
+
+          . (Join-Path $env:GITHUB_WORKSPACE 'verify-archive-download.ps1')
+          try {
+            Invoke-VerifiedDownload -Url $env:RUBY_ARCHIVE_URL -ExpectedDigest $env:RUBY_ARCHIVE_DIGEST -DestinationPath $archive | Out-Null
+          } catch {
+            Write-Error "RubyInstaller download/verification failed: $($_.Exception.Message)"
+            exit 1
+          }
+          Write-Host "RubyInstaller archive digest verified: $env:RUBY_ARCHIVE_DIGEST"
+
+          $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
+          if (!(Test-Path $sevenZip)) {
+            $sevenZip = '7z.exe'
+          }
+          & $sevenZip x $archive "-o$rubyParent" -y
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "RubyInstaller extraction failed."
+            exit $LASTEXITCODE
+          }
+
+          $rubyExe = Get-ChildItem $rubyParent -Recurse -Filter ruby.exe -File | Where-Object {
+            $_.FullName -match '\\bin\\ruby\.exe$'
+          } | Select-Object -First 1
+          if (-not $rubyExe) {
+            Write-Error "RubyInstaller extraction failed: ruby.exe was not found under $rubyParent."
+            exit 1
+          }
+
+          & $rubyExe.FullName --version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "RubyInstaller validation failed: ruby.exe could not run."
+            exit $LASTEXITCODE
+          }
+
+          $rubyPlatform = & $rubyExe.FullName -e "require 'rubygems'; print Gem::Platform.local.to_s"
+          if ($rubyPlatform -ne $env:GEM_PLATFORM) {
+            Write-Error "RubyInstaller validation failed: expected Ruby platform $env:GEM_PLATFORM, got $rubyPlatform."
+            exit 1
+          }
+
+          Write-Host "::notice::RubyInstaller $env:RUBY_INSTALLER_VERSION provenance verified: digest matched, ruby.exe runs, platform is $rubyPlatform."

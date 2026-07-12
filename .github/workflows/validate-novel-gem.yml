@@ -34,7 +34,8 @@ on:
         required: false
         default: "4.0.5-1"
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   validate_novel_gem:
@@ -47,6 +48,18 @@ jobs:
       MSYS2_PREFIX: ucrt64
 
     steps:
+      # Needed only to reach verify-archive-download.ps1 (the shared
+      # download-verify helper, Phase 18) -- this workflow otherwise
+      # deliberately runs no repo-tooling code. persist-credentials: false,
+      # matching every other checkout in this repo; needs no GH_TOKEN.
+      - name: Checkout repository (shared verified-download helper only)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            verify-archive-download.ps1
+          sparse-checkout-cone-mode: false
+
       - name: Validate inputs
         shell: powershell
         env:
@@ -211,18 +224,15 @@ jobs:
           $archive = Join-Path $env:RUNNER_TEMP "rubyinstaller-$rubyInstallerVersion-x64.7z"
 
           New-Item -ItemType Directory -Path $rubyParent -Force | Out-Null
-          Invoke-WebRequest -Uri $env:RUBY_ARCHIVE_URL -OutFile $archive -UseBasicParsing -TimeoutSec 60
-          if (!(Test-Path $archive)) {
-            Write-Error "RubyInstaller download failed: expected archive $archive was not created."
-            exit 1
-          }
 
-          $localDigest = "sha256:" + (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($localDigest -ne $env:RUBY_ARCHIVE_DIGEST) {
-            Write-Error "RubyInstaller download digest mismatch -- expected $env:RUBY_ARCHIVE_DIGEST, got $localDigest. Refusing to extract or run it."
+          . (Join-Path $env:GITHUB_WORKSPACE 'verify-archive-download.ps1')
+          try {
+            Invoke-VerifiedDownload -Url $env:RUBY_ARCHIVE_URL -ExpectedDigest $env:RUBY_ARCHIVE_DIGEST -DestinationPath $archive | Out-Null
+          } catch {
+            Write-Error "RubyInstaller download/verification failed: $($_.Exception.Message)"
             exit 1
           }
-          Write-Host "RubyInstaller archive digest verified: $localDigest"
+          Write-Host "RubyInstaller archive digest verified: $env:RUBY_ARCHIVE_DIGEST"
 
           $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
           if (!(Test-Path $sevenZip)) {

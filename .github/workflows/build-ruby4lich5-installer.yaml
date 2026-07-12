@@ -77,7 +77,19 @@ jobs:
           $series = $env:RUBY_SERIES_INPUT
           if ($series -notmatch '^\d+\.\d+$') { Write-Error "ruby-series must look like 4.0; got '$series'."; exit 1 }
           $escaped = [regex]::Escape($series)
-          $rels = gh api repos/oneclick/rubyinstaller2/releases --paginate | ConvertFrom-Json
+          # Output captured and $LASTEXITCODE checked immediately, parsed only
+          # on success -- same fix already established elsewhere in this
+          # project (ruby4-bundled-gems-suite.yml's gem-bundle digest-retry
+          # loop, 2026-07-09, and its own RubyInstaller digest step, Item 29):
+          # piping `gh api` straight into ConvertFrom-Json would make a
+          # genuine command failure (auth/network/rate-limit) look like a
+          # JSON parse error instead of surfacing the real `gh` error text.
+          $apiOutput = gh api repos/oneclick/rubyinstaller2/releases --paginate 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "gh api failed listing RubyInstaller releases -- $apiOutput"
+            exit 1
+          }
+          $rels = $apiOutput | ConvertFrom-Json
           $rel = $rels |
             Where-Object { $_.tag_name -match "^RubyInstaller-$escaped\.\d+-\d+$" } |
             Sort-Object { [version]($_.tag_name -replace '^RubyInstaller-([\d.]+)-\d+$', '$1') },
@@ -112,13 +124,14 @@ jobs:
           # /components is an allowlist (default ruby,rdoc,msys2). Passing only
           # 'ruby' never writes rdoc docs or the MSYS2 toolchain. Run on the
           # runner (throwaway registration); we ship the resulting tree, not the .exe.
-          Invoke-WebRequest -Uri $env:RUBY_EXE_URL -OutFile rubyinstaller.exe -UseBasicParsing
-          $localExeDigest = "sha256:" + (Get-FileHash -Path .\rubyinstaller.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($localExeDigest -ne $env:RUBY_EXE_DIGEST) {
-            Write-Error "RubyInstaller download digest mismatch -- expected $env:RUBY_EXE_DIGEST, got $localExeDigest. Refusing to run it."
+          . (Join-Path $env:GITHUB_WORKSPACE 'verify-archive-download.ps1')
+          try {
+            Invoke-VerifiedDownload -Url $env:RUBY_EXE_URL -ExpectedDigest $env:RUBY_EXE_DIGEST -DestinationPath (Join-Path $PWD 'rubyinstaller.exe') | Out-Null
+          } catch {
+            Write-Error "RubyInstaller download/verification failed: $($_.Exception.Message)"
             exit 1
           }
-          Write-Host "RubyInstaller digest verified: $localExeDigest"
+          Write-Host "RubyInstaller digest verified: $env:RUBY_EXE_DIGEST"
           $ruby = Join-Path $PWD 'ruby'
           Start-Process -FilePath .\rubyinstaller.exe -Wait -ArgumentList `
             '/verysilent','/norestart','/currentuser',"/dir=$ruby",'/components=ruby','/tasks=nomodpath,noassocfiles,noridkinstall'
