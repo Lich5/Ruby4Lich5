@@ -343,18 +343,14 @@ jobs:
           }
           New-Item -ItemType Directory -Path $rubyParent -Force | Out-Null
 
-          Invoke-WebRequest -Uri $env:RUBY_ARCHIVE_URL -OutFile $archive -UseBasicParsing -TimeoutSec 60
-          if (!(Test-Path $archive)) {
-            Write-Error "RubyInstaller download failed: expected archive $archive was not created."
+          . (Join-Path $env:GITHUB_WORKSPACE 'verify-archive-download.ps1')
+          try {
+            Invoke-VerifiedDownload -Url $env:RUBY_ARCHIVE_URL -ExpectedDigest $env:RUBY_ARCHIVE_DIGEST -DestinationPath $archive | Out-Null
+          } catch {
+            Write-Error "RubyInstaller download/verification failed: $($_.Exception.Message)"
             exit 1
           }
-
-          $localDigest = "sha256:" + (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($localDigest -ne $env:RUBY_ARCHIVE_DIGEST) {
-            Write-Error "RubyInstaller download digest mismatch -- expected $env:RUBY_ARCHIVE_DIGEST, got $localDigest. Refusing to extract or run it."
-            exit 1
-          }
-          Write-Host "RubyInstaller archive digest verified: $localDigest"
+          Write-Host "RubyInstaller archive digest verified: $env:RUBY_ARCHIVE_DIGEST"
 
           $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
           if (!(Test-Path $sevenZip)) {
@@ -1300,6 +1296,20 @@ jobs:
       PKG_DIR: ${{ github.workspace }}\pkg
 
     steps:
+      # Needed only to reach verify-archive-download.ps1 (the shared
+      # download-verify helper, Phase 18) -- this job otherwise deliberately
+      # runs no repo-tooling code, only the downloaded artifact below and a
+      # fresh RubyInstaller. persist-credentials: false, matching every
+      # other checkout in this repo; checkout itself needs no GH_TOKEN and
+      # happens before any untrusted gem code runs.
+      - name: Checkout repository (shared verified-download helper only)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            verify-archive-download.ps1
+          sparse-checkout-cone-mode: false
+
       - name: Download packaged runtime gem bundle
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
@@ -1333,18 +1343,15 @@ jobs:
 
           $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION
           $archive = Join-Path $env:RUNNER_TEMP "rubyinstaller-$rubyInstallerVersion-x64.7z"
-          Invoke-WebRequest -Uri $env:RUBY_ARCHIVE_URL -OutFile $archive -UseBasicParsing -TimeoutSec 60
-          if (!(Test-Path $archive)) {
-            Write-Error "Clean packaged smoke failed: RubyInstaller download failed; expected archive $archive was not created."
-            exit 1
-          }
 
-          $localDigest = "sha256:" + (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($localDigest -ne $env:RUBY_ARCHIVE_DIGEST) {
-            Write-Error "Clean packaged smoke failed: RubyInstaller download digest mismatch -- expected $env:RUBY_ARCHIVE_DIGEST, got $localDigest. Refusing to extract or run it."
+          . (Join-Path $env:GITHUB_WORKSPACE 'verify-archive-download.ps1')
+          try {
+            Invoke-VerifiedDownload -Url $env:RUBY_ARCHIVE_URL -ExpectedDigest $env:RUBY_ARCHIVE_DIGEST -DestinationPath $archive | Out-Null
+          } catch {
+            Write-Error "Clean packaged smoke failed: RubyInstaller download/verification failed: $($_.Exception.Message)"
             exit 1
           }
-          Write-Host "RubyInstaller archive digest verified: $localDigest"
+          Write-Host "RubyInstaller archive digest verified: $env:RUBY_ARCHIVE_DIGEST"
 
           $smokeParent = 'C:\Ruby4Lich5\clean-smoke-ruby'
           if (Test-Path $smokeParent) {

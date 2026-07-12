@@ -1,0 +1,85 @@
+﻿<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<test-results xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="nunit_schema_2.5.xsd" name="Pester" total="24" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-07-12" time="08:10:18">
+  <environment user-domain="" user="doug" os-version="25.5.0" nunit-version="2.5.8.0" clr-version="10.0.9" platform="Darwin" cwd="/Users/doug/dev/stage/Ruby4Lich5" machine-name="Landon.local" />
+  <culture-info current-culture="en-US" current-uiculture="en-US" />
+  <test-suite type="TestFixture" name="Pester" executed="True" result="Success" success="True" time="1.8037" asserts="0" description="Pester">
+    <results>
+      <test-suite type="TestFixture" name="/Users/doug/dev/stage/Ruby4Lich5/spec/powershell/fetch-lich.Tests.ps1" executed="True" result="Success" success="True" time="1.5336" asserts="0" description="/Users/doug/dev/stage/Ruby4Lich5/spec/powershell/fetch-lich.Tests.ps1">
+        <results>
+          <test-suite type="TestFixture" name="Invoke-LichFetch" executed="True" result="Success" success="True" time="1.3434" asserts="0" description="Invoke-LichFetch">
+            <results>
+              <test-suite type="TestFixture" name="Invoke-LichFetch.happy path" executed="True" result="Success" success="True" time="0.9797" asserts="0" description="Invoke-LichFetch.happy path">
+                <results>
+                  <test-case description="returns the resolved tag" name="Invoke-LichFetch.happy path.returns the resolved tag" time="0.4057" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="requests the latest release endpoint, not a specific tag" name="Invoke-LichFetch.happy path.requests the latest release endpoint, not a specific tag" time="0.127" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="downloads specifically the lich-5.zip asset, not the tar.gz or the .exe" name="Invoke-LichFetch.happy path.downloads specifically the lich-5.zip asset, not the tar.gz or the .exe" time="0.0696" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="extracts into the parent of DestDir, not DestDir itself" name="Invoke-LichFetch.happy path.extracts into the parent of DestDir, not DestDir itself" time="0.0621" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="writes a lich-fetched.txt record containing the resolved tag" name="Invoke-LichFetch.happy path.writes a lich-fetched.txt record containing the resolved tag" time="0.0631" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="sets TLS 1.2 before the first network call" name="Invoke-LichFetch.happy path.sets TLS 1.2 before the first network call" time="0.0585" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="verifies the downloaded zip against the release-reported digest" name="Invoke-LichFetch.happy path.verifies the downloaded zip against the release-reported digest" time="0.0566" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="removes a pre-existing DestDir before extracting, so a stale install cannot linger" name="Invoke-LichFetch.happy path.removes a pre-existing DestDir before extracting, so a stale install cannot linger" time="0.0578" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="cleans up the downloaded zip after extraction" name="Invoke-LichFetch.happy path.cleans up the downloaded zip after extraction" time="0.0647" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+              <test-suite type="TestFixture" name="Invoke-LichFetch.the release has no lich-5.zip asset" executed="True" result="Success" success="True" time="1.067" asserts="0" description="Invoke-LichFetch.the release has no lich-5.zip asset">
+                <results>
+                  <test-case description="throws naming the missing asset and the release tag" name="Invoke-LichFetch.the release has no lich-5.zip asset.throws naming the missing asset and the release tag" time="0.0523" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="never attempts a download once the asset is confirmed missing" name="Invoke-LichFetch.the release has no lich-5.zip asset.never attempts a download once the asset is confirmed missing" time="0.032" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+              <test-suite type="TestFixture" name="Invoke-LichFetch.extraction did not produce the expected DestDir" executed="True" result="Success" success="True" time="1.122" asserts="0" description="Invoke-LichFetch.extraction did not produce the expected DestDir">
+                <results>
+                  <test-case description="throws rather than silently leaving the xcopy source empty" name="Invoke-LichFetch.extraction did not produce the expected DestDir.throws rather than silently leaving the xcopy source empty" time="0.053" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+              <test-suite type="TestFixture" name="Invoke-LichFetch.lich-5.zip digest does not match what was downloaded" executed="True" result="Success" success="True" time="1.2432" asserts="0" description="Invoke-LichFetch.lich-5.zip digest does not match what was downloaded">
+                <results>
+                  <test-case description="throws naming both digests, rather than extracting an unverified download" name="Invoke-LichFetch.lich-5.zip digest does not match what was downloaded.throws naming both digests, rather than extracting an unverified download" time="0.0404" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="never attempts extraction once the digest check fails" name="Invoke-LichFetch.lich-5.zip digest does not match what was downloaded.never attempts extraction once the digest check fails" time="0.0394" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="cleans up the mismatched download rather than leaving it on disk" name="Invoke-LichFetch.lich-5.zip digest does not match what was downloaded.cleans up the mismatched download rather than leaving it on disk" time="0.0393" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+              <test-suite type="TestFixture" name="Invoke-LichFetch.the release reports no digest for lich-5.zip" executed="True" result="Success" success="True" time="1.3379" asserts="0" description="Invoke-LichFetch.the release reports no digest for lich-5.zip">
+                <results>
+                  <test-case description="throws rather than installing an unverifiable download" name="Invoke-LichFetch.the release reports no digest for lich-5.zip.throws rather than installing an unverifiable download" time="0.0502" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="never attempts extraction once the digest is confirmed missing" name="Invoke-LichFetch.the release reports no digest for lich-5.zip.never attempts extraction once the digest is confirmed missing" time="0.0414" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+            </results>
+          </test-suite>
+        </results>
+      </test-suite>
+      <test-suite type="TestFixture" name="/Users/doug/dev/stage/Ruby4Lich5/spec/powershell/verify-archive-download.Tests.ps1" executed="True" result="Success" success="True" time="0.2701" asserts="0" description="/Users/doug/dev/stage/Ruby4Lich5/spec/powershell/verify-archive-download.Tests.ps1">
+        <results>
+          <test-suite type="TestFixture" name="Invoke-VerifiedDownload" executed="True" result="Success" success="True" time="0.2475" asserts="0" description="Invoke-VerifiedDownload">
+            <results>
+              <test-suite type="TestFixture" name="Invoke-VerifiedDownload.happy path" executed="True" result="Success" success="True" time="0.0865" asserts="0" description="Invoke-VerifiedDownload.happy path">
+                <results>
+                  <test-case description="downloads, verifies, and returns the destination path when the digest matches" name="Invoke-VerifiedDownload.happy path.downloads, verifies, and returns the destination path when the digest matches" time="0.0524" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="passes the given TimeoutSec through to Invoke-WebRequest" name="Invoke-VerifiedDownload.happy path.passes the given TimeoutSec through to Invoke-WebRequest" time="0.0321" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+              <test-suite type="TestFixture" name="Invoke-VerifiedDownload.malformed ExpectedDigest" executed="True" result="Success" success="True" time="0.1297" asserts="0" description="Invoke-VerifiedDownload.malformed ExpectedDigest">
+                <results>
+                  <test-case description="throws before ever attempting a download" name="Invoke-VerifiedDownload.malformed ExpectedDigest.throws before ever attempting a download" time="0.0191" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="rejects an empty string via the Mandatory parameter binding itself" name="Invoke-VerifiedDownload.malformed ExpectedDigest.rejects an empty string via the Mandatory parameter binding itself" time="0.0216" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+              <test-suite type="TestFixture" name="Invoke-VerifiedDownload.digest mismatch" executed="True" result="Success" success="True" time="0.1666" asserts="0" description="Invoke-VerifiedDownload.digest mismatch">
+                <results>
+                  <test-case description="throws and deletes the downloaded file, never returning a path" name="Invoke-VerifiedDownload.digest mismatch.throws and deletes the downloaded file, never returning a path" time="0.0346" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+              <test-suite type="TestFixture" name="Invoke-VerifiedDownload.download failure" executed="True" result="Success" success="True" time="0.2437" asserts="0" description="Invoke-VerifiedDownload.download failure">
+                <results>
+                  <test-case description="throws when the destination file was never created" name="Invoke-VerifiedDownload.download failure.throws when the destination file was never created" time="0.0346" asserts="0" success="True" result="Success" executed="True" />
+                  <test-case description="cleans up a partial file left behind by a transport failure mid-download" name="Invoke-VerifiedDownload.download failure.cleans up a partial file left behind by a transport failure mid-download" time="0.0399" asserts="0" success="True" result="Success" executed="True" />
+                </results>
+              </test-suite>
+            </results>
+          </test-suite>
+        </results>
+      </test-suite>
+    </results>
+  </test-suite>
+</test-results>
