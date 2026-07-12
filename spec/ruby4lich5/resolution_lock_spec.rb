@@ -1,19 +1,10 @@
 # frozen_string_literal: true
 
 require 'ruby4lich5/resolution_lock'
+require_relative '../support/closure_fixtures'
 
 RSpec.describe Ruby4Lich5::ResolutionLock do
-  def classification(state, **overrides)
-    Ruby4Lich5::Classification.new(state: state, gem_name: 'unused', gem_version: '1.0.0', reason: 'test', **overrides)
-  end
-
-  def closure_entry(name, version, deps: [], state: :pure, **classification_overrides)
-    {
-      name: name, version: version,
-      runtime_dependencies: deps.map { |dep_name, req| { name: dep_name, requirement: Gem::Requirement.new(req || '>= 0') } },
-      classification: classification(state, **classification_overrides)
-    }
-  end
+  include ClosureFixtures
 
   let(:valid_commit_sha) { 'a' * 40 }
   let(:valid_digest) { "sha256:#{'b' * 64}" }
@@ -32,6 +23,20 @@ RSpec.describe Ruby4Lich5::ResolutionLock do
         registry_commit_sha: valid_commit_sha, registry_content_digest: valid_digest
       }.merge(overrides)
     )
+  end
+
+  describe '#ruby_abi' do
+    it 'derives the ABI series from ruby_installer_version, mirroring ruby4-bundled-gems-suite.yml\'s own convention' do
+      lock = build(ruby_installer_version: '4.0.5-1')
+
+      expect(lock.ruby_abi).to eq('4.0')
+    end
+
+    it 'handles a multi-digit series correctly, not just single digits' do
+      lock = build(ruby_installer_version: '10.22.5-1')
+
+      expect(lock.ruby_abi).to eq('10.22')
+    end
   end
 
   describe '#to_h' do

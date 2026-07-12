@@ -99,6 +99,20 @@ module Ruby4Lich5
       @registry_content_digest = deep_freeze(@registry_content_digest)
     end
 
+    # The ABI series, derived from {#ruby_installer_version} -- never a
+    # separate lock field (the schema deliberately doesn't carry a
+    # redundant series alongside the exact version; PR D's own doc comment
+    # already names +ruby_installer_version+ as "never just the ABI
+    # series"). Mirrors the exact derivation
+    # +ruby4-bundled-gems-suite.yml+ already uses for the same purpose
+    # (+-replace '^(\d+\.\d+)\..*$', '$1'+), not a second, independent
+    # convention.
+    #
+    # @return [String] e.g. +"4.0"+ from +"4.0.5-1"+
+    def ruby_abi
+      @ruby_installer_version[/\A(\d+\.\d+)\./, 1]
+    end
+
     # @return [Hash] JSON-serializable, matching this project's existing
     #   small-JSON-hand-off convention (e.g. {CuratedGemsSeedBuilder#build})
     def to_h
