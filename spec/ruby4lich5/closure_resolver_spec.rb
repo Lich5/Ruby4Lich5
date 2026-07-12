@@ -5,18 +5,33 @@ require 'rubygems/resolver'
 require 'net/http'
 
 RSpec.describe Ruby4Lich5::ClosureResolver do
-  def node(name, version, deps = [])
-    { name: name, version: version, runtime_dependency_names: deps }
+  # Input shape for the injected `resolve:` callable -- dep_names may be
+  # bare Strings (an unconstrained dependency, Gem::Requirement.default,
+  # i.e. ">= 0") or [name, requirement_string] pairs when a test cares about
+  # the actual constraint.
+  def input_node(name, version, deps = [])
+    runtime_dependencies = deps.map do |dep|
+      dep_name, requirement_string = dep.is_a?(Array) ? dep : [dep, nil]
+      { name: dep_name, requirement: Gem::Requirement.new(requirement_string || Gem::Requirement.default) }
+    end
+    { name: name, version: version, runtime_dependencies: runtime_dependencies }
+  end
+
+  # #resolve_closure's real output shape: runtime_dependencies (the richer
+  # {name:, requirement:} pairs) plus runtime_dependency_names (derived from
+  # it, kept for existing callers) -- both always present together.
+  def output_node(name, version, deps = [])
+    input_node(name, version, deps).merge(runtime_dependency_names: deps.map { |dep| dep.is_a?(Array) ? dep.first : dep })
   end
 
   describe '#resolve_closure' do
     context 'with a single gem and no dependencies' do
       it 'returns just that gem' do
-        resolve = ->(_name, _version) { [node('ascii_charts', '0.9.1')] }
+        resolve = ->(_name, _version) { [input_node('ascii_charts', '0.9.1')] }
         resolver = described_class.new(resolve: resolve)
 
         expect(resolver.resolve_closure('ascii_charts', '0.9.1'))
-          .to eq([node('ascii_charts', '0.9.1')])
+          .to eq([output_node('ascii_charts', '0.9.1')])
       end
     end
 
@@ -26,8 +41,8 @@ RSpec.describe Ruby4Lich5::ClosureResolver do
         # directly against rubygems.org before writing this.
         resolve = lambda do |_name, _version|
           [
-            node('terminal-table', '3.0.2', ['unicode-display_width']),
-            node('unicode-display_width', '2.6.0')
+            input_node('terminal-table', '3.0.2', ['unicode-display_width']),
+            input_node('unicode-display_width', '2.6.0')
           ]
         end
         resolver = described_class.new(resolve: resolve)
@@ -36,10 +51,32 @@ RSpec.describe Ruby4Lich5::ClosureResolver do
 
         expect(result).to eq(
           [
-            node('unicode-display_width', '2.6.0'),
-            node('terminal-table', '3.0.2', ['unicode-display_width'])
+            output_node('unicode-display_width', '2.6.0'),
+            output_node('terminal-table', '3.0.2', ['unicode-display_width'])
           ]
         )
+      end
+    end
+
+    context 'with a real Gem::Requirement on an edge' do
+      it 'survives the round trip into runtime_dependencies, unchanged, while runtime_dependency_names stays name-only' do
+        # Real gap, found in review: an earlier version discarded
+        # Gem::Dependency#requirement entirely, keeping only .map(&:name) --
+        # a locked Phase 17 SS8 design requirement (the future resolution
+        # lock needs the actual constraint, not just which names exist).
+        resolve = lambda do |_name, _version|
+          [
+            input_node('root-gem', '1.0.0', [['dep-gem', '>= 2.6']]),
+            input_node('dep-gem', '2.7.0')
+          ]
+        end
+        resolver = described_class.new(resolve: resolve)
+
+        result = resolver.resolve_closure('root-gem', '1.0.0')
+        root_entry = result.find { |entry| entry[:name] == 'root-gem' }
+
+        expect(root_entry[:runtime_dependencies]).to eq([{ name: 'dep-gem', requirement: Gem::Requirement.new('>= 2.6') }])
+        expect(root_entry[:runtime_dependency_names]).to eq(['dep-gem'])
       end
     end
 
@@ -50,10 +87,10 @@ RSpec.describe Ruby4Lich5::ClosureResolver do
         # real topological sort instead of trusting incidental output order.
         resolve = lambda do |_name, _version|
           [
-            node('cairo', '1.18.5', %w[red-colors pkg-config]),
-            node('cairo-gobject', '4.3.6', %w[cairo red-colors]),
-            node('red-colors', '0.4.0'),
-            node('pkg-config', '1.5.6')
+            input_node('cairo', '1.18.5', %w[red-colors pkg-config]),
+            input_node('cairo-gobject', '4.3.6', %w[cairo red-colors]),
+            input_node('red-colors', '0.4.0'),
+            input_node('pkg-config', '1.5.6')
           ]
         end
         resolver = described_class.new(resolve: resolve)
@@ -75,7 +112,7 @@ RSpec.describe Ruby4Lich5::ClosureResolver do
         # actually needs, surfacing later as a confusing failure far from
         # its real cause instead of here, where the gap is actually known.
         resolve = lambda do |_name, _version|
-          [node('widget', '1.0.0', ['not-in-the-resolved-set'])]
+          [input_node('widget', '1.0.0', ['not-in-the-resolved-set'])]
         end
         resolver = described_class.new(resolve: resolve)
 
@@ -93,6 +130,38 @@ RSpec.describe Ruby4Lich5::ClosureResolver do
 
     before do
       allow(Gem::Resolver).to receive(:new).and_return(fake_gem_resolver)
+    end
+
+    it 'excludes development dependencies and preserves a runtime dependency real Gem::Requirement' do
+      # Real gap, found in review: the previous default_resolve test
+      # coverage only ever stubbed fake_gem_resolver.resolve to raise
+      # (the error-wrapping paths below), never to succeed -- so
+      # default_resolve's own extraction logic (dep.type == :runtime
+      # filtering, dep.requirement preservation) was only ever exercised
+      # indirectly through the injected `resolve:` callable, which bypasses
+      # default_resolve entirely. Uses a real Gem::Specification (not a
+      # hand-rolled double) so add_runtime_dependency/
+      # add_development_dependency produce real Gem::Dependency objects
+      # with real #type/#requirement values, the exact same objects
+      # default_resolve's own spec.dependencies would return in production.
+      root_spec = Gem::Specification.new('root-gem', '1.0.0') do |s|
+        s.add_runtime_dependency('dep-gem', '>= 2.6')
+        s.add_development_dependency('rspec', '~> 3.0')
+      end
+      dep_spec = Gem::Specification.new('dep-gem', '2.7.0')
+      # A real Gem::Resolver#resolve returns the full closure, root and
+      # dependency alike -- dep-gem must be present too, or
+      # #topological_sort's own completeness check (a real, separate
+      # concern -- an incomplete closure isn't benign) raises instead.
+      activation_requests = [root_spec, dep_spec].map { |spec| instance_double(Gem::Resolver::ActivationRequest, spec: spec) }
+      allow(fake_gem_resolver).to receive(:resolve).and_return(activation_requests)
+      resolver = described_class.new
+
+      result = resolver.resolve_closure('root-gem', '1.0.0')
+      root_entry = result.find { |entry| entry[:name] == 'root-gem' }
+
+      expect(root_entry[:runtime_dependencies]).to eq([{ name: 'dep-gem', requirement: Gem::Requirement.new('>= 2.6') }])
+      expect(root_entry[:runtime_dependency_names]).to eq(['dep-gem'])
     end
 
     it 'wraps a Net::OpenTimeout as ResolutionError naming the configured timeout' do

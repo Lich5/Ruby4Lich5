@@ -20,11 +20,13 @@ module Ruby4Lich5
     private_constant :DEFAULT_TIMEOUT_SECONDS
 
     # @param resolve [#call] +->(gem_name, version) { [{name:, version:,
-    #   runtime_dependency_names:}, ...] }+ -- the full resolved set, in any
-    #   order; this class does its own topological sort rather than trusting
-    #   the resolver's incidental output order. Defaults to a real
-    #   +Gem::Resolver+ call against rubygems.org; specs should inject a
-    #   stub so they never hit real network.
+    #   runtime_dependencies: [{name:, requirement:}]}, ...] }+ -- the full
+    #   resolved set, in any order; this class does its own topological sort
+    #   rather than trusting the resolver's incidental output order. Each
+    #   dependency's +requirement+ is a real +Gem::Requirement+, not a
+    #   String. Defaults to a real +Gem::Resolver+ call against
+    #   rubygems.org; specs should inject a stub so they never hit real
+    #   network.
     # @param timeout_seconds [Numeric] wall-clock bound for the default
     #   resolve, in case rubygems.org is slow or unreachable. Unused when
     #   +resolve+ is overridden -- a caller-supplied callable is responsible
@@ -36,10 +38,12 @@ module Ruby4Lich5
 
     # @param gem_name [String]
     # @param version [String] exact version to resolve, e.g. +"3.5.6"+
-    # @return [Array<Hash>] +{name:, version:, runtime_dependency_names:}+
-    #   entries, topologically sorted -- every dependency appears before
-    #   anything that depends on it, and the requested gem itself appears
-    #   last
+    # @return [Array<Hash>] +{name:, version:, runtime_dependencies:
+    #   [{name:, requirement:}], runtime_dependency_names:}+ entries,
+    #   topologically sorted -- every dependency appears before anything
+    #   that depends on it, and the requested gem itself appears last.
+    #   +runtime_dependency_names+ is derived from +runtime_dependencies+,
+    #   never a second independent source of truth.
     # @raise [ResolutionError] if the gem+version can't be resolved
     # @raise [IncompleteClosureError] if a resolved node's declared runtime
     #   dependency isn't itself present in the resolved set
@@ -65,12 +69,17 @@ module Ruby4Lich5
     # missing something it needs, surfacing later as a confusing failure far
     # from its actual cause instead of here, where the gap is actually known.
     #
-    # @return [Array<Hash>] +{name:, version:, runtime_dependency_names:}+
-    #   entries in dependency order -- the dependency names are carried
-    #   through (not just consumed internally) so callers building on top of
-    #   the closure, e.g. a vendoring-role classifier that needs to know
-    #   which native gem depends on which other one, don't have to re-resolve
-    #   from scratch to get edges this class already has.
+    # @return [Array<Hash>] +{name:, version:, runtime_dependencies:,
+    #   runtime_dependency_names:}+ entries in dependency order --
+    #   +runtime_dependency_names+ (bare Strings, derived from
+    #   +runtime_dependencies+, never a second independent source of truth)
+    #   is kept for existing callers (e.g. a vendoring-role classifier that
+    #   only needs to know which native gem depends on which other one);
+    #   +runtime_dependencies+ (+{name:, requirement:}+ pairs, a real
+    #   +Gem::Requirement+ per edge) is for callers that need the actual
+    #   version constraint too, e.g. Phase 17's resolution lock -- real gap,
+    #   found in review: an earlier version discarded
+    #   +Gem::Dependency#requirement+ entirely, keeping only names.
     # @raise [IncompleteClosureError]
     def topological_sort(nodes)
       by_name = nodes.each_with_object({}) { |node, index| index[node.fetch(:name)] = node }
@@ -87,18 +96,20 @@ module Ruby4Lich5
                 "#{required_by} depends on #{name}, which is not present in the resolved set"
         end
 
-        node.fetch(:runtime_dependency_names).each { |dep_name| visit.call(dep_name, name) }
+        runtime_dependencies = node.fetch(:runtime_dependencies)
+        runtime_dependencies.each { |dep| visit.call(dep.fetch(:name), name) }
         ordered << { name: node.fetch(:name), version: node.fetch(:version),
-                     runtime_dependency_names: node.fetch(:runtime_dependency_names) }
+                     runtime_dependencies: runtime_dependencies,
+                     runtime_dependency_names: runtime_dependencies.map { |dep| dep.fetch(:name) } }
       end
 
       nodes.each { |node| visit.call(node.fetch(:name), nil) }
       ordered
     end
 
-    # @return [Array<Hash>] +{name:, version:, runtime_dependency_names:}+
-    #   entries for the full resolved set, in whatever order Gem::Resolver
-    #   happened to produce them
+    # @return [Array<Hash>] +{name:, version:, runtime_dependencies:
+    #   [{name:, requirement:}]}+ entries for the full resolved set, in
+    #   whatever order Gem::Resolver happened to produce them
     # @raise [ResolutionError]
     def default_resolve(gem_name, version)
       require 'rubygems/remote_fetcher' # not autoloaded; Gem::Resolver::BestSet needs it
@@ -115,7 +126,8 @@ module Ruby4Lich5
         {
           name: spec.name,
           version: spec.version.to_s,
-          runtime_dependency_names: spec.dependencies.select { |dep| dep.type == :runtime }.map(&:name)
+          runtime_dependencies: spec.dependencies.select { |dep| dep.type == :runtime }
+                                    .map { |dep| { name: dep.name, requirement: dep.requirement } }
         }
       end
     rescue Gem::Exception => e
