@@ -34,6 +34,20 @@ RSpec.describe Ruby4Lich5::ResolutionLock do
     )
   end
 
+  describe '#ruby_abi' do
+    it 'derives the ABI series from ruby_installer_version, mirroring ruby4-bundled-gems-suite.yml\'s own convention' do
+      lock = build(ruby_installer_version: '4.0.5-1')
+
+      expect(lock.ruby_abi).to eq('4.0')
+    end
+
+    it 'handles a multi-digit series correctly, not just single digits' do
+      lock = build(ruby_installer_version: '10.22.5-1')
+
+      expect(lock.ruby_abi).to eq('10.22')
+    end
+  end
+
   describe '#to_h' do
     it 'serializes every field into the locked schema shape' do
       result = build.to_h
