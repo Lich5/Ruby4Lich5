@@ -1,0 +1,14 @@
+{
+  "schema": 2,
+  "gems": {
+    "../escape-attempt": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": { "expected_classification": "pure" }
+        }
+      }
+    }
+  }
+}

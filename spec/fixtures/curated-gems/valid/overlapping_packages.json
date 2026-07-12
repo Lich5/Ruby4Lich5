@@ -1,0 +1,29 @@
+{
+  "schema": 2,
+  "gems": {
+    "example-native-gem-a": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "native_self_contained",
+            "msys2_packages": ["mingw-w64-ucrt-x86_64-shared-lib", "mingw-w64-ucrt-x86_64-a-only"]
+          }
+        }
+      }
+    },
+    "example-native-gem-b": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": {
+            "expected_classification": "native_self_contained",
+            "msys2_packages": ["mingw-w64-ucrt-x86_64-shared-lib", "mingw-w64-ucrt-x86_64-b-only"]
+          }
+        }
+      }
+    }
+  }
+}
