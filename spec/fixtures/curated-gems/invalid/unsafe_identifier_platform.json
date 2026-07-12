@@ -1,0 +1,14 @@
+{
+  "schema": 2,
+  "gems": {
+    "example-pure-gem": {
+      "approval": "approved",
+      "bundle_default": false,
+      "targets": {
+        "../escape-attempt": {
+          "4.0": { "expected_classification": "pure" }
+        }
+      }
+    }
+  }
+}

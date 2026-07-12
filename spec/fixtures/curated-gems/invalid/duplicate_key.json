@@ -1,0 +1,15 @@
+{
+  "schema": 2,
+  "gems": {
+    "example-pure-gem": {
+      "approval": "approved",
+      "bundle_default": true,
+      "bundle_default": false,
+      "targets": {
+        "x64-mingw-ucrt": {
+          "4.0": { "expected_classification": "pure" }
+        }
+      }
+    }
+  }
+}
