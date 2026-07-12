@@ -72,6 +72,18 @@ module Ruby4Lich5
     #   honestly describe the checked-in file's own bytes.
     attr_reader :content_digest
 
+    # The smallest public seam onto {SCHEMA_VERSION} -- kept `private_constant`
+    # (nothing outside this class should read the raw schema-version number
+    # as if it were free-standing data), but {CuratedGemsSeedBuilder} writes
+    # a `"schema"` field that must always agree with what this class accepts,
+    # and a second hardcoded literal there was a real single-source-of-truth
+    # violation, found in review: nothing enforced the two ever matching.
+    #
+    # @return [Integer] the only +schema+ value this class currently accepts
+    def self.schema_version
+      SCHEMA_VERSION
+    end
+
     # Loads and validates the real, checked-in registry file, computing its
     # content digest over the exact bytes on disk (before any encoding
     # coercion) so the digest reflects precisely what's committed to git --

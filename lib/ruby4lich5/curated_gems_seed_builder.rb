@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'curated_gem_registry'
+
 module Ruby4Lich5
   # Assembles a {CuratedGemRegistry}-shaped Hash from already-resolved
   # {BuildPlanner#plan_for} results -- deliberately takes already-resolved
@@ -18,8 +20,15 @@ module Ruby4Lich5
     # resolve by picking whichever root happened to be processed last.
     class ConflictError < StandardError; end
 
-    # @return [Integer] must match {CuratedGemRegistry::SCHEMA_VERSION}
-    SCHEMA_VERSION = 2
+    # Real single-source-of-truth fix, found in review: previously a second
+    # hardcoded +2+ literal here, with nothing enforcing it ever matched
+    # {CuratedGemRegistry::SCHEMA_VERSION}. Derived from
+    # {CuratedGemRegistry.schema_version} instead -- still a private
+    # constant, computed once at load time, not a per-call method dispatch
+    # threaded through {#build}.
+    #
+    # @return [Integer] always exactly {CuratedGemRegistry.schema_version}
+    SCHEMA_VERSION = CuratedGemRegistry.schema_version
     private_constant :SCHEMA_VERSION
 
     # @param root_plans [Hash{String => Array<Hash>}] root gem name =>

@@ -113,19 +113,32 @@ RSpec.describe Ruby4Lich5::CuratedGemsSeedBuilder do
     end
   end
 
-  it 'merges a gem reached from two different roots, taking bundle_default: true if either root marks it' do
+  it 'merges a gem reached from two different roots, keeping bundle_default: true when it is itself a default root' do
+    # Real gap, found in CodeRabbit review: an earlier version of this test
+    # named "shared-dep" in neither root's default_root_names, so
+    # bundle_default (computed purely from name membership in
+    # default_root_names -- see #merge_entry!, unrelated to which root's
+    # plan an entry came from) could only ever be false here, regardless of
+    # whether the merge itself preserved a true from either side. Asserting
+    # false and calling that "OR" coverage proved nothing about the merge
+    # path at all. Fixed: shared-dep is itself in default_root_names, so
+    # it's reached as a real root/transitive-dependency merge (via both
+    # root-a and root-b's plans, exercising #merge_conflicting_entry!) while
+    # also demonstrably keeping bundle_default: true throughout.
     shared_pure = plan_entry('shared-dep', classification(:pure))
     root_a_plan = [plan_entry('root-a', classification(:pure)), shared_pure]
     root_b_plan = [plan_entry('root-b', classification(:pure)), shared_pure]
     builder = described_class.new(
-      root_plans: { 'root-a' => root_a_plan, 'root-b' => root_b_plan }, default_root_names: ['root-b'],
+      root_plans: { 'root-a' => root_a_plan, 'root-b' => root_b_plan },
+      default_root_names: ['root-b', 'shared-dep'],
       platform: 'x64-mingw-ucrt', ruby_abi: '4.0', msys2_packages: msys2_packages
     )
 
     result = builder.build
 
     expect(result['gems'].keys).to contain_exactly('root-a', 'root-b', 'shared-dep')
-    expect(result['gems']['shared-dep']['bundle_default']).to be(false)
+    expect(result['gems']['shared-dep']['bundle_default']).to be(true)
+    expect(result['gems']['root-a']['bundle_default']).to be(false)
   end
 
   it 'raises ConflictError when the same gem name classifies differently across two roots' do
