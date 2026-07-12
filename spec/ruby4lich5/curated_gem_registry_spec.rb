@@ -104,23 +104,28 @@ RSpec.describe Ruby4Lich5::CuratedGemRegistry do
       unsafe_identifier_msys2_package.json
     ]
 
-    invalid_fixtures.each do |filename|
-      it "rejects #{filename}" do
+    # Two real rejection points exist: parse_strict (duplicate keys,
+    # malformed JSON) and #initialize (every semantic schema check).
+    # duplicate_key.json is the only fixture caught by the first -- data
+    # never successfully reaches #new for it (confirmed directly: every
+    # other fixture here parses cleanly). Asserted per-fixture below, not a
+    # blanket "either raise point is a pass" rescue -- that would have let
+    # an unexpected parse_strict failure on any *other* fixture (e.g. a
+    # typo making it malformed JSON) silently count as a pass without ever
+    # exercising #initialize's own rejection at all.
+    (invalid_fixtures - ['duplicate_key.json']).each do |filename|
+      it "rejects #{filename} at #initialize, after parsing successfully" do
         raw_text = File.read(fixture_path('invalid', filename))
-
-        # Two real rejection points exist: parse_strict (duplicate keys,
-        # malformed JSON) and #initialize (every semantic schema check).
-        # duplicate_key.json is only ever caught by the first -- data never
-        # successfully reaches #new for it -- so this checks both points
-        # rather than assuming every fixture fails at the same one.
-        begin
-          data = described_class.parse_strict(raw_text)
-        rescue described_class::ValidationError
-          next
-        end
+        data = described_class.parse_strict(raw_text)
 
         expect { described_class.new(data) }.to raise_error(described_class::ValidationError)
       end
+    end
+
+    it 'rejects duplicate_key.json at .parse_strict itself, before #initialize is ever reachable' do
+      raw_text = File.read(fixture_path('invalid', 'duplicate_key.json'))
+
+      expect { described_class.parse_strict(raw_text) }.to raise_error(described_class::ValidationError)
     end
   end
 
@@ -153,23 +158,44 @@ RSpec.describe Ruby4Lich5::CuratedGemRegistry do
     end
   end
 
-  describe '#packages_for (KnownNativeGems-compatible facade query)' do
-    it 'returns the current-target packages for a known native gem' do
+  describe '#self_build_packages_for (KnownNativeGems-compatible facade query)' do
+    it 'returns the current-target packages for a native_self_contained gem' do
       registry = described_class.new(load_fixture('valid', 'native_self_contained.json'))
 
-      expect(registry.packages_for('example-native-gem')).to eq(['mingw-w64-ucrt-x86_64-example'])
+      expect(registry.self_build_packages_for('example-native-gem')).to eq(['mingw-w64-ucrt-x86_64-example'])
     end
 
-    it 'returns an empty array for a known pure gem' do
+    it 'returns nil for a known pure gem -- not a self-build candidate at all' do
       registry = described_class.new(load_fixture('valid', 'minimal.json'))
 
-      expect(registry.packages_for('example-pure-gem')).to eq([])
+      expect(registry.self_build_packages_for('example-pure-gem')).to be_nil
     end
 
     it 'returns nil for an unknown gem, matching KnownNativeGems.packages_for exactly' do
       registry = described_class.new(load_fixture('valid', 'minimal.json'))
 
-      expect(registry.packages_for('totally-unknown-gem')).to be_nil
+      expect(registry.self_build_packages_for('totally-unknown-gem')).to be_nil
+    end
+
+    describe 'regression: an approved native_pass_through gem must never be mistaken for a self-build candidate' do
+      # Real bug, found in review before this method had a real caller: an
+      # earlier version gated only on #known? (registry membership), so an
+      # approved native_pass_through entry -- a real, current case
+      # (upstream sqlite3/ffi now ship precompiled x64-mingw-ucrt builds
+      # matching Ruby 4.0's ABI) -- returned [] (empty, but truthy) instead
+      # of nil. Classifier#self_build_classification branches on that exact
+      # nil-vs-Array truthiness; a truthy empty Array would have silently
+      # produced :native_self_contained with zero packages to build with,
+      # instead of failing closed as :native_needs_system_lib the moment a
+      # gem's upstream precompiled build ever disappears.
+      let(:registry) { described_class.new(load_fixture('valid', 'native_pass_through.json')) }
+
+      it 'returns nil, not an empty Array, for a native_pass_through gem' do
+        result = registry.self_build_packages_for('example-pass-through-gem')
+
+        expect(result).to be_nil
+        expect(result).not_to eq([])
+      end
     end
   end
 

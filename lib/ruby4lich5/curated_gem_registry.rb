@@ -72,6 +72,18 @@ module Ruby4Lich5
     #   honestly describe the checked-in file's own bytes.
     attr_reader :content_digest
 
+    # The smallest public seam onto {SCHEMA_VERSION} -- kept `private_constant`
+    # (nothing outside this class should read the raw schema-version number
+    # as if it were free-standing data), but {CuratedGemsSeedBuilder} writes
+    # a `"schema"` field that must always agree with what this class accepts,
+    # and a second hardcoded literal there was a real single-source-of-truth
+    # violation, found in review: nothing enforced the two ever matching.
+    #
+    # @return [Integer] the only +schema+ value this class currently accepts
+    def self.schema_version
+      SCHEMA_VERSION
+    end
+
     # Loads and validates the real, checked-in registry file, computing its
     # content digest over the exact bytes on disk (before any encoding
     # coercion) so the digest reflects precisely what's committed to git --
@@ -177,13 +189,38 @@ module Ruby4Lich5
     # parameter, since the class it replaces predates target-awareness.
     # Always answers against {CURRENT_PLATFORM}/{CURRENT_RUBY_ABI}.
     #
+    # **Deliberately narrower than "approved at all," found and fixed in
+    # review before this had a real caller.** `KnownNativeGems` meant
+    # "permitted fallback self-build": +nil+ answered "not a curated
+    # self-build candidate," a non-empty Array answered "yes, here's the
+    # recipe" -- and `Classifier#self_build_classification` branches on
+    # exactly that nil-vs-Array truthiness to decide
+    # +:native_self_contained+ vs. +:native_needs_system_lib+. The registry
+    # means something broader: "approved, with *some* technical
+    # classification" -- `pure` and `native_pass_through` gems get real
+    # approved entries too (real example found during PR B's seed
+    # derivation: `sqlite3`/`ffi` are approved and `native_pass_through`
+    # today, upstream now ships matching precompiled builds). An earlier
+    # version of this method returned `msys2_packages_for` gated only on
+    # {#known?} (registry membership), which is *not* classification-aware
+    # -- for a `native_pass_through` gem that returns `[]` (empty, but
+    # truthy in Ruby), not +nil+. Fed into
+    # `Classifier#self_build_classification`'s `if packages` check, a
+    # truthy empty Array would have silently produced
+    # +:native_self_contained+ with zero packages to actually build with,
+    # instead of failing closed as +:native_needs_system_lib+ the moment a
+    # gem's upstream precompiled build ever disappears. Gated on
+    # {#classification_for} instead, not {#known?}, so only a genuine
+    # +native_self_contained+ entry -- never `pure`/`native_pass_through`,
+    # and never an unapproved gem -- returns a value.
+    #
     # @param gem_name [String]
-    # @return [Array<String>, nil] MSYS2 packages, or +nil+ if +gem_name+
-    #   isn't known at all (matches {KnownNativeGems.packages_for}'s exact
-    #   contract, including returning +nil+ rather than +[]+ for an unknown
-    #   gem)
-    def packages_for(gem_name)
-      return nil unless known?(gem_name)
+    # @return [Array<String>, nil] MSYS2 packages, or +nil+ unless
+    #   +gem_name+ is approved as +native_self_contained+ for
+    #   {CURRENT_PLATFORM}/{CURRENT_RUBY_ABI} -- matches
+    #   {KnownNativeGems.packages_for}'s exact contract
+    def self_build_packages_for(gem_name)
+      return nil unless classification_for(gem_name, CURRENT_PLATFORM, CURRENT_RUBY_ABI) == 'native_self_contained'
 
       msys2_packages_for(gem_name, CURRENT_PLATFORM, CURRENT_RUBY_ABI)
     end
