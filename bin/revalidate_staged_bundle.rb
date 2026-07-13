@@ -57,15 +57,28 @@ end
 
 lock_json_path, platform, pre_stage_baseline_json_path = ARGV
 
-unless Gem::Platform.local.to_s == platform
-  warn "FATAL: this process is not a genuine bootstrapped #{platform.inspect} Ruby -- Gem::Platform.local is " \
-       "#{Gem::Platform.local.to_s.inspect}. Revalidation must run under the exact Ruby the bundle was staged " \
-       'into; introspecting any other Ruby\'s own gem inventory would validate the wrong environment.'
+begin
+  lock = Ruby4Lich5::ResolutionLock.from_h(JSON.parse(File.read(lock_json_path)))
+rescue JSON::ParserError, Ruby4Lich5::ResolutionLock::ValidationError => e
+  warn "ERROR: #{e.class}: #{e.message}"
+  exit 2
+end
+
+# The CLI's own platform argument is no longer trusted as independent
+# authority -- real gap, found in review 2026-07-13: it previously only had
+# to agree with Gem::Platform.local, never with lock.platform itself, so a
+# caller could revalidate a genuinely correct bootstrapped Ruby against a
+# lock resolved for a *different* platform and still pass this guard.
+# All three -- the argument, Gem::Platform.local, and the lock's own
+# recorded platform -- must agree.
+unless platform == lock.platform && Gem::Platform.local.to_s == lock.platform
+  warn "FATAL: platform mismatch -- CLI argument is #{platform.inspect}, Gem::Platform.local is " \
+       "#{Gem::Platform.local.to_s.inspect}, and the resolved lock's own platform is #{lock.platform.inspect}. " \
+       'All three must agree; revalidating under or against the wrong platform would validate the wrong environment.'
   exit 2
 end
 
 begin
-  lock = Ruby4Lich5::ResolutionLock.from_h(JSON.parse(File.read(lock_json_path)))
   pre_stage_baseline_versions = JSON.parse(File.read(pre_stage_baseline_json_path))
 
   # @return [String, nil] the highest installed version RubyGems itself
@@ -97,7 +110,7 @@ begin
     lock: lock, staged_member_versions: staged_member_versions, target_bundled_gem_versions: target_bundled_gem_versions,
     pre_stage_baseline_versions: pre_stage_baseline_versions
   ).revalidate!
-rescue JSON::ParserError, Ruby4Lich5::ResolutionLock::ValidationError => e
+rescue JSON::ParserError => e
   warn "ERROR: #{e.class}: #{e.message}"
   exit 2
 rescue Ruby4Lich5::StagedClosureRevalidator::RevalidationFailure => e

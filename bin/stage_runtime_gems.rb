@@ -35,14 +35,14 @@
 #
 # Exit status:
 #   0 -- success, output_manifest_json_path written.
-#   1 -- a bad ARGV invocation, malformed lock/built-gem-paths JSON, or
-#        any unrecognized exception (including a real RubygemsClient
-#        network failure -- worth retrying).
-#   2 -- deterministic, do not retry: ResolutionLock::ValidationError (a
-#        malformed lock) or LockedArtifactMapBuilder::VerificationError
+#   1 -- a bad ARGV invocation, a real RubygemsClient network failure
+#        (worth retrying), or any other unrecognized exception.
+#   2 -- deterministic, do not retry: malformed lock or built-gem-paths
+#        JSON (JSON::ParserError), ResolutionLock::ValidationError (a
+#        malformed lock), or LockedArtifactMapBuilder::VerificationError
 #        (a locally-built or downloaded artifact doesn't actually match
-#        what the lock recorded). Both operate purely on inputs already
-#        on disk or already resolved.
+#        what the lock recorded). All three operate purely on inputs
+#        already on disk or already resolved.
 
 require 'json'
 require_relative '../lib/ruby4lich5/locked_artifact_map_builder'

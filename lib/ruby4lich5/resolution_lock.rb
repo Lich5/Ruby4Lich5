@@ -297,12 +297,25 @@ module Ruby4Lich5
                                 "entry (#{name.inspect} #{version.inspect})"
       end
 
+      # Validated as a String before .to_sym -- real gap, found in review
+      # 2026-07-13: JSON null, a number, or an object/array all respond to
+      # neither KeyError nor TypeError/ArgumentError when .to_sym is called
+      # directly on them -- they raise a bare NoMethodError (no such
+      # method), past this whole boundary's promised ValidationError
+      # contract entirely. Confirmed live for all three shapes before
+      # fixing.
+      state_value = classification_data.fetch('state')
+      unless state_value.is_a?(String)
+        raise ValidationError, "closure member #{name.inspect}'s classification state must be a string, " \
+                                "got #{state_value.class}: #{state_value.inspect}"
+      end
+
       {
         name: name,
         version: version,
         runtime_dependencies: runtime_dependencies_data.map { |dep| deserialize_dependency(name, dep) },
         classification: Classification.new(
-          state: classification_data.fetch('state').to_sym,
+          state: state_value.to_sym,
           gem_name: gem_name,
           gem_version: gem_version,
           reason: classification_data.fetch('reason'),

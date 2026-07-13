@@ -84,8 +84,18 @@ module Ruby4Lich5
                                   "from gtk3's own resolved closure"
       end
 
+      # Excludes 'gtk3' from the runtime_gems side of the merge -- real gap,
+      # found in review 2026-07-13: bin/resolve_bundle_lock.rb already
+      # filters 'gtk3' out of its own runtime_gems_csv before calling here
+      # (the real workflow's runtime-gems default input starts with the
+      # bare word "gtk3"), but that protection lived only in that one
+      # caller. Without it here too, Hash#merge's right-hand side would
+      # silently win, letting a live rubygems_client.latest_version('gtk3')
+      # result overwrite the caller-supplied gtk3_version -- the exact
+      # double-resolution bug this module's own header comment already
+      # promises structurally cannot happen.
       { 'gtk3' => gtk3_version }.merge(
-        runtime_gems.to_h { |name| [name, rubygems_client.latest_version(name)] }
+        runtime_gems.reject { |name| name == 'gtk3' }.to_h { |name| [name, rubygems_client.latest_version(name)] }
       )
     end
   end

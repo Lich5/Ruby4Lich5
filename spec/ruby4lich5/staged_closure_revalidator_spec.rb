@@ -208,6 +208,27 @@ RSpec.describe Ruby4Lich5::StagedClosureRevalidator do
         expect { revalidator.revalidate! }.not_to raise_error
       end
 
+      it "raises when a name already in the pre-stage baseline drifts to a different version, not just when it's brand new" do
+        # Real gap, found in review 2026-07-13: the original check was a
+        # pure name-set difference (target.keys - baseline.keys -
+        # lock_names), which silently absorbed any name already present in
+        # the baseline regardless of whether its own version had actually
+        # changed. An unpinned live install upgrading a pre-existing,
+        # non-lock gem ("preinstalled-gem", here from 1.1.1 to 9.9.9) is
+        # exactly the kind of drift a pure name-membership check can never
+        # catch -- reproduced live before fixing: this case raised nothing.
+        closure = [closure_entry('root-gem', '1.0.0', state: :pure)]
+        revalidator = build_revalidator(
+          lock: lock(closure: closure), staged_member_versions: { 'root-gem' => '1.0.0' },
+          target_bundled_gem_versions: { 'root-gem' => '1.0.0', 'preinstalled-gem' => '9.9.9' },
+          pre_stage_baseline_versions: { 'preinstalled-gem' => '1.1.1' }
+        )
+
+        expect { revalidator.revalidate! }
+          .to raise_error(described_class::RevalidationFailure,
+                          /"preinstalled-gem": version changed from "1\.1\.1" \(pre-stage baseline\) to "9\.9\.9" after staging/)
+      end
+
       it 'does not flag a ruby_bundled member that is a real, accounted-for lock closure member' do
         closure = [closure_entry('json', '2.7.1', state: :ruby_bundled)]
         revalidator = build_revalidator(

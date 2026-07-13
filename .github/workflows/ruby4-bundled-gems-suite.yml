@@ -771,11 +771,10 @@ jobs:
         shell: powershell
         run: |
           $sourceRoot = $env:SOURCE_ROOT
-          $platform = $env:GEM_PLATFORM
           $planPath = Join-Path $env:RUNNER_TEMP 'native-gems-plan.json'
           $script = Join-Path $env:GITHUB_WORKSPACE 'bin\prepare_native_gems_from_lock.rb'
 
-          & $env:RUBY_EXE $script $env:RESOLUTION_LOCK $platform $sourceRoot $planPath
+          & $env:RUBY_EXE $script $env:RESOLUTION_LOCK $sourceRoot $planPath
           $exitCode = $LASTEXITCODE
           if ($exitCode -ne 0) {
             Write-Error "Native gem preparation failed (exit $exitCode) -- see the CLI's own stderr output above."
@@ -1374,8 +1373,8 @@ jobs:
             $repackSourceVersion = $repackEntry.version
             $repackSourceGem = Join-Path $env:GEM_SRC_ROOT "$gemName-$repackSourceVersion.gem"
             if (!(Test-Path $repackSourceGem)) {
-              Write-Error "Runtime bundle failed: expected locked source gem $repackSourceGem was not found -- " `
-                          '"Download upstream gem sources" should have fetched it.'
+              Write-Error ("Runtime bundle failed: expected locked source gem $repackSourceGem was not found -- " + `
+                           '"Download upstream gem sources" should have fetched it.')
               exit 1
             }
             & $gemExe install $repackSourceGem --local --ignore-dependencies --force

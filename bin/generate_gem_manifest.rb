@@ -78,10 +78,22 @@ rescue JSON::ParserError, Ruby4Lich5::ResolutionLock::ValidationError => e
   exit 2
 end
 
-root_names = lock.requested_roots.keys
-delivery_states_by_name = lock.closure
-                              .reject { |entry| entry.fetch(:classification).ruby_bundled? }
-                              .each_with_object({}) { |entry, states| states[entry.fetch(:name)] = entry.fetch(:classification).state.to_s }
+non_bundled_closure = lock.closure.reject { |entry| entry.fetch(:classification).ruby_bundled? }
+delivery_states_by_name = non_bundled_closure.each_with_object({}) do |entry, states|
+  states[entry.fetch(:name)] = entry.fetch(:classification).state.to_s
+end
+
+# A requested root that itself classifies ruby_bundled (never staged, no
+# artifact -- see GemManifestGenerator::ACCEPTED_DELIVERY_STATES's own doc
+# comment) has no .gem file to find and no unit to build. Filtered out here,
+# using the same ruby_bundled? criterion delivery_states_by_name already
+# applies, before it ever reaches InstalledGemClosure (which would raise
+# MissingSpecError looking for a staged file that was never going to exist)
+# or GemManifestGenerator (whose own root -> unit grouping would otherwise
+# raise GemUnitGrouper::ArgumentError for a root absent from the resolved
+# closure).
+non_bundled_names = non_bundled_closure.map { |entry| entry.fetch(:name) }
+root_names = lock.requested_roots.keys & non_bundled_names
 
 digest_fetcher = Ruby4Lich5::NativeGemDigestFetcher.new(repo: repo, platform: lock.platform)
 closure_resolver = Ruby4Lich5::InstalledGemClosure.new(

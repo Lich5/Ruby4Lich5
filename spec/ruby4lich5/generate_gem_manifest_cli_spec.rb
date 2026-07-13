@@ -72,6 +72,16 @@ RSpec.describe 'bin/generate_gem_manifest.rb (CLI integration)' do
       ) }
   end
 
+  # @return [Hash] a {ResolutionLock#initialize}-shaped closure entry,
+  #   classified ruby_bundled -- never staged, no artifact
+  def bundled_entry(name, version)
+    { name: name, version: version, runtime_dependencies: [],
+      classification: Ruby4Lich5::Classification.new(
+        state: :ruby_bundled, gem_name: name, gem_version: version,
+        reason: 'fixture', platform_asset: nil, msys2_packages: nil
+      ) }
+  end
+
   # Writes a real, valid ResolutionLock's own #to_h JSON to +path+ -- the
   # CLI's only source of root names, ruby_abi, platform, and delivery
   # states (2026-07-13 audit finding: the old CSV-args boundary let a
@@ -101,7 +111,7 @@ RSpec.describe 'bin/generate_gem_manifest.rb (CLI integration)' do
 
   def run_cli(args)
     cli_path = File.expand_path('../../bin/generate_gem_manifest.rb', __dir__)
-    env = { 'PATH' => "#{@bin_dir}:#{ENV.fetch('PATH', nil)}" }
+    env = { 'PATH' => "#{@bin_dir}#{File::PATH_SEPARATOR}#{ENV.fetch('PATH', nil)}" }
     Open3.capture2e(env, 'ruby', cli_path, *args)
   end
 
@@ -172,6 +182,36 @@ RSpec.describe 'bin/generate_gem_manifest.rb (CLI integration)' do
 
     expect(status).not_to be_success
     expect(File.exist?(@out_path)).to be(false)
+  end
+
+  it 'excludes a ruby_bundled requested root entirely, rather than crashing looking for its staged file' do
+    # CodeRabbit finding, 2026-07-13: a requested root that itself
+    # classifies ruby_bundled (never staged, no artifact) previously
+    # reached InstalledGemClosure as if it were a real staged member,
+    # which would raise MissingSpecError -- or, if that were patched
+    # without also filtering GemManifestGenerator's own root_names,
+    # GemUnitGrouper::ArgumentError instead (a root absent from the
+    # resolved closure). Neither should happen; it should simply be
+    # omitted, exactly like any other ruby_bundled closure member.
+    all_native = Ruby4Lich5::GemManifestGenerator::GTK3_STACK + %w[sqlite3]
+    all_native.each { |name| build_real_gem(@pkg_dir, name, '1.0.0') }
+    write_fake_gh(@bin_dir, @pkg_dir, all_native.to_h { |name| [name, '1.0.0'] })
+
+    requested_roots = all_native.to_h { |name| [name, '1.0.0'] }.merge('webrick' => '1.9.1')
+    closure = all_native.map { |name| self_contained_entry(name, '1.0.0') } + [bundled_entry('webrick', '1.9.1')]
+    lock = Ruby4Lich5::ResolutionLock.new(
+      ruby_installer_version: '4.0.5-1', platform: 'x64-mingw-ucrt', requested_roots: requested_roots, closure: closure,
+      registry_commit_sha: 'a' * 40, registry_content_digest: "sha256:#{'b' * 64}"
+    )
+    File.write(@lock_path, JSON.pretty_generate(lock.to_h))
+
+    args = [@lock_path, 'Lich5/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
+            'R4L5-gem-bundle-x64-mingw-ucrt.zip', "sha256:#{'c' * 64}", @pkg_dir, @out_path]
+    stdout_and_err, status = run_cli(args)
+
+    expect(status).to be_success, "CLI failed: #{stdout_and_err}"
+    unit_ids = JSON.parse(File.read(@out_path))['targets'].first['units'].map { |u| u['id'] }
+    expect(unit_ids).to contain_exactly('gtk3-runtime', 'sqlite3') # 'webrick' never gets a unit at all
   end
 
   it 'exits with code 2 and writes nothing when the lock file is malformed' do

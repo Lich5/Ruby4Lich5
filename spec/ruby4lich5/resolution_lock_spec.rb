@@ -311,6 +311,37 @@ RSpec.describe Ruby4Lich5::ResolutionLock do
           expect { described_class.from_h(data) }
             .to raise_error(described_class::ValidationError, /malformed resolution lock data/)
         end
+
+        # Real gap, found in review 2026-07-13: classification_data.fetch('state').to_sym
+        # was called directly on whatever JSON produced -- nil, a number,
+        # and a Hash/Array all lack #to_sym entirely, so each raised a bare
+        # NoMethodError past this whole boundary's promised ValidationError
+        # contract (not caught by .from_h's own `rescue KeyError, TypeError,
+        # ArgumentError`, since NoMethodError is none of those). Confirmed
+        # live for all three shapes before fixing.
+        it 'raises ValidationError, not a raw NoMethodError, for a null classification state' do
+          data = build.to_h
+          data['closure'].first['classification']['state'] = nil
+
+          expect { described_class.from_h(data) }
+            .to raise_error(described_class::ValidationError, /classification state must be a string/)
+        end
+
+        it 'raises ValidationError, not a raw NoMethodError, for a numeric classification state' do
+          data = build.to_h
+          data['closure'].first['classification']['state'] = 42
+
+          expect { described_class.from_h(data) }
+            .to raise_error(described_class::ValidationError, /classification state must be a string/)
+        end
+
+        it 'raises ValidationError, not a raw NoMethodError, for an object-shaped classification state' do
+          data = build.to_h
+          data['closure'].first['classification']['state'] = { 'nested' => 'value' }
+
+          expect { described_class.from_h(data) }
+            .to raise_error(described_class::ValidationError, /classification state must be a string/)
+        end
       end
     end
   end

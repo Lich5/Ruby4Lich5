@@ -155,24 +155,39 @@ module Ruby4Lich5
     end
 
     # Every name present after staging (the complete, unfiltered
-    # +target_bundled_gem_versions+ inventory) must be explained by one of
-    # two things: it was already there before staging started (the
-    # pre-stage baseline), or it's a real member of this lock's own
-    # closure (of *any* classification, not just non-bundled -- a
-    # ruby_bundled member is still a real, accounted-for name). Anything
-    # else slipped in some other way -- an unpinned live install pulling
-    # in an undeclared transitive dependency, most likely -- and is real,
-    # unexplained drift.
+    # +target_bundled_gem_versions+ inventory) that isn't itself a member of
+    # this lock's own closure (of *any* classification -- a ruby_bundled
+    # member is still a real, accounted-for name, checked elsewhere) must be
+    # explained by the pre-stage baseline: present at the *same* version
+    # beforehand. Two distinct ways that can fail, both real, unexplained
+    # drift -- an unpinned live install pulling in an undeclared transitive
+    # dependency that was never there before, or one silently upgrading a
+    # gem that already existed pre-stage:
+    # - the name wasn't in the baseline at all (brand new)
+    # - the name *was* in the baseline, but at a different version -- real
+    #   gap, found in review 2026-07-13: a pure name-set difference alone
+    #   (this method's original shape) could never catch this second case,
+    #   since subtracting +baseline.keys+ silently absorbs any pre-existing
+    #   name regardless of whether its own version actually changed.
     #
     # @return [Array<String>]
     def unexplained_extra_violations
       lock_names = @lock.closure.map { |entry| entry.fetch(:name) }
-      extras = @target_bundled_gem_versions.keys - @pre_stage_baseline_versions.keys - lock_names
+      non_lock_names = @target_bundled_gem_versions.keys - lock_names
 
-      extras.sort.map do |name|
-        "#{name.inspect}: installed version #{@target_bundled_gem_versions.fetch(name).inspect} is present after " \
-        'staging but was neither in the pre-stage baseline nor named anywhere in the resolved lock -- unexplained ' \
-        'drift, likely an unpinned live install pulling in an undeclared dependency'
+      non_lock_names.sort.filter_map do |name|
+        target_version = @target_bundled_gem_versions.fetch(name)
+        baseline_version = @pre_stage_baseline_versions[name]
+
+        if baseline_version.nil?
+          "#{name.inspect}: installed version #{target_version.inspect} is present after staging but was neither " \
+          'in the pre-stage baseline nor named anywhere in the resolved lock -- unexplained drift, likely an ' \
+          'unpinned live install pulling in an undeclared dependency'
+        elsif baseline_version != target_version
+          "#{name.inspect}: version changed from #{baseline_version.inspect} (pre-stage baseline) to " \
+          "#{target_version.inspect} after staging, despite not being named anywhere in the resolved lock -- " \
+          'unexplained drift, likely an unpinned live install upgrading an existing gem'
+        end
       end
     end
 

@@ -77,6 +77,27 @@ RSpec.describe Ruby4Lich5::DefaultRootSelection do
         expect(result['custom-gem-b']).to eq('custom-gem-b-resolved')
       end
 
+      it "keeps the caller-supplied gtk3_version authoritative even if runtime_gems also names 'gtk3'" do
+        # Regression, found in review 2026-07-13: only bin/resolve_bundle_lock.rb
+        # filtered 'gtk3' out of its own runtime_gems_csv before calling
+        # here -- this module itself never enforced it, so a caller (or a
+        # future second caller) passing runtime_gems: ['gtk3'] would let
+        # Hash#merge silently overwrite gtk3_version with a live
+        # rubygems_client.latest_version('gtk3') result instead. Reproduced
+        # live before fixing: returned {"gtk3"=>"gtk3-resolved", ...},
+        # not the given override.
+        rubygems_client = instance_double(Ruby4Lich5::RubygemsClient)
+        allow(rubygems_client).to receive(:latest_version) { |name| "#{name}-resolved" }
+
+        result = described_class.resolve_versions(
+          rubygems_client: rubygems_client, gtk3_version: '9.9.9', runtime_gems: %w[gtk3 custom-gem]
+        )
+
+        expect(result['gtk3']).to eq('9.9.9')
+        expect(result.keys).to contain_exactly('gtk3', 'custom-gem')
+        expect(rubygems_client).not_to have_received(:latest_version).with('gtk3')
+      end
+
       it 'accepts an empty runtime_gems -- a real GTK3-only dispatch, not an error' do
         # Regression, per review 2026-07-13: bin/resolve_bundle_lock.rb
         # used to reject an empty post-filter runtime_gems_csv outright,

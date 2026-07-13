@@ -23,32 +23,40 @@
 # binary gem suite" step, which only ever reads that plan for the fixed
 # 10-gem GTK3 build list, needs zero changes to keep consuming this.
 #
+# <platform> is deliberately not a separate CLI argument -- real gap, found
+# in review 2026-07-13: an earlier version accepted it independently, which
+# let a caller normalize/patch against a platform that silently disagreed
+# with what the lock actually resolved for. lock.platform (the one value
+# BuildPlanner#plan_for/Classifier already resolved this same closure
+# against, per ResolutionLock's own doc comment) is the only platform this
+# script ever uses.
+#
 # Usage:
-#   ruby bin/prepare_native_gems_from_lock.rb <lock_json_path> <platform> <source_root> <output_json_path>
+#   ruby bin/prepare_native_gems_from_lock.rb <lock_json_path> <source_root> <output_json_path>
 #
 # Exit status:
 #   0 -- success, output_json_path written.
-#   1 -- a bad ARGV invocation, malformed lock JSON, or any unrecognized
-#        exception.
-#   2 -- deterministic, do not retry: BuildPlanner::UnbuildableGemError,
-#        GemspecNormalizer::NormalizationError, PatchApplier::PatchError,
-#        PatchGenerator::GenerationError, or ResolutionLock::ValidationError
-#        (a malformed lock file). All operate purely on inputs already
-#        resolved and downloaded to local disk.
+#   1 -- a bad ARGV invocation, or any unrecognized exception.
+#   2 -- deterministic, do not retry: malformed lock JSON (JSON::ParserError),
+#        ResolutionLock::ValidationError (a malformed lock file),
+#        BuildPlanner::UnbuildableGemError, GemspecNormalizer::NormalizationError,
+#        PatchApplier::PatchError, or PatchGenerator::GenerationError. All
+#        operate purely on inputs already resolved and downloaded to local
+#        disk.
 
 require 'json'
 require_relative '../lib/ruby4lich5/native_gem_preparer'
 require_relative '../lib/ruby4lich5/patch_generator'
 require_relative '../lib/ruby4lich5/resolution_lock'
 
-ARG_NAMES = %i[lock_json_path platform source_root output_json_path].freeze
+ARG_NAMES = %i[lock_json_path source_root output_json_path].freeze
 
 if ARGV.size != ARG_NAMES.size
   warn "Usage: #{$PROGRAM_NAME} #{ARG_NAMES.map { |n| "<#{n}>" }.join(' ')}"
   exit 1
 end
 
-lock_json_path, platform, source_root, output_json_path = ARGV
+lock_json_path, source_root, output_json_path = ARGV
 
 begin
   lock = Ruby4Lich5::ResolutionLock.from_h(JSON.parse(File.read(lock_json_path)))
@@ -66,7 +74,7 @@ begin
   end
 
   preparer = Ruby4Lich5::NativeGemPreparer.new
-  plan = preparer.prepare_from_plan(plan_shaped_closure, platform: platform, source_root: source_root)
+  plan = preparer.prepare_from_plan(plan_shaped_closure, platform: lock.platform, source_root: source_root)
 
   # Inside the protected region -- real gap, found in audit 2026-07-13: a
   # write failure here (bad output directory, permissions, full disk)
