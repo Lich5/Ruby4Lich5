@@ -18,12 +18,23 @@ RSpec.describe Ruby4Lich5::BuildPlanner do
     )
   end
 
+  # Matches the real Ruby4Lich5::ClosureResolver#resolve_closure output
+  # shape from PR C onward -- runtime_dependencies (real Gem::Requirement
+  # per edge) alongside the existing name-only field. BuildPlanner#plan_for
+  # now carries both through (PR F1); a stub node missing
+  # runtime_dependencies would raise a real KeyError against the actual
+  # implementation, not a theoretical concern.
+  def node(name, version, deps = [])
+    { name: name, version: version,
+      runtime_dependencies: deps.map { |dep_name| { name: dep_name, requirement: Gem::Requirement.default } },
+      runtime_dependency_names: deps }
+  end
+
   describe '#plan_for' do
     context 'when the whole closure is already satisfied by the curation manifest' do
       it 'returns an empty plan without classifying anything' do
         allow(closure_resolver).to receive(:resolve_closure).with('sqlite3', '1.7.3')
-                                                            .and_return([{ name: 'sqlite3', version: '1.7.3',
-                                                                            runtime_dependency_names: [] }])
+                                                            .and_return([node('sqlite3', '1.7.3')])
         allow(manifest).to receive(:satisfied?).with('sqlite3', '1.7.3', 'x64-mingw-ucrt').and_return(true)
         expect(classifier).not_to receive(:classify)
 
@@ -36,8 +47,8 @@ RSpec.describe Ruby4Lich5::BuildPlanner do
     context 'with a dependency chain where only the leaf needs building' do
       it 'omits the satisfied dependent and plans only the unsatisfied leaf' do
         closure = [
-          { name: 'unicode-display_width', version: '2.6.0', runtime_dependency_names: [] },
-          { name: 'terminal-table', version: '3.0.2', runtime_dependency_names: ['unicode-display_width'] }
+          node('unicode-display_width', '2.6.0'),
+          node('terminal-table', '3.0.2', ['unicode-display_width'])
         ]
         allow(closure_resolver).to receive(:resolve_closure).with('terminal-table', '3.0.2').and_return(closure)
         allow(manifest).to receive(:satisfied?).with('unicode-display_width', '2.6.0', 'x64-mingw-ucrt')
@@ -51,13 +62,14 @@ RSpec.describe Ruby4Lich5::BuildPlanner do
 
         expect(result.map { |entry| entry[:name] }).to eq(['unicode-display_width'])
         expect(result.first[:runtime_dependency_names]).to eq([])
+        expect(result.first[:runtime_dependencies]).to eq([])
         expect(classifier).not_to have_received(:classify).with(hash_including(name: 'terminal-table'))
       end
     end
 
     context 'when a gem in the closure classifies as native-needs-system-lib' do
       it 'raises UnbuildableGemError naming the gem and reason, failing the whole request' do
-        closure = [{ name: 'gtk3', version: '4.3.7', runtime_dependency_names: [] }]
+        closure = [node('gtk3', '4.3.7')]
         allow(closure_resolver).to receive(:resolve_closure).with('gtk3', '4.3.7').and_return(closure)
         allow(manifest).to receive(:satisfied?).with('gtk3', '4.3.7', 'x64-mingw-ucrt').and_return(false)
         allow(classifier).to receive(:classify)
@@ -72,8 +84,8 @@ RSpec.describe Ruby4Lich5::BuildPlanner do
     context 'when every gem in the closure needs building' do
       it 'returns them all, in dependency order, each carrying its own classification' do
         closure = [
-          { name: 'unicode-display_width', version: '2.6.0', runtime_dependency_names: [] },
-          { name: 'terminal-table', version: '3.0.2', runtime_dependency_names: ['unicode-display_width'] }
+          node('unicode-display_width', '2.6.0'),
+          node('terminal-table', '3.0.2', ['unicode-display_width'])
         ]
         allow(closure_resolver).to receive(:resolve_closure).with('terminal-table', '3.0.2').and_return(closure)
         allow(manifest).to receive(:satisfied?).and_return(false)
@@ -89,6 +101,7 @@ RSpec.describe Ruby4Lich5::BuildPlanner do
         expect(result.map { |entry| entry[:name] }).to eq(%w[unicode-display_width terminal-table])
         expect(result.map { |entry| entry[:classification].pure? }).to all(be(true))
         expect(result.map { |entry| entry[:runtime_dependency_names] }).to eq([[], ['unicode-display_width']])
+        expect(result.last[:runtime_dependencies]).to eq([{ name: 'unicode-display_width', requirement: Gem::Requirement.default }])
       end
     end
   end

@@ -38,6 +38,33 @@ module Ruby4Lich5
     attr_reader :ruby_installer_version, :platform, :requested_roots, :closure,
                 :registry_commit_sha, :registry_content_digest
 
+    # The same ABI-series derivation {#ruby_abi} uses, exposed as a public
+    # class method so a caller building the closure/plan that will
+    # eventually go *into* a lock (e.g. the F1 CLI's own
+    # +BuildPlanner#plan_for+/+CuratedGemRegistry#self_build_packages_for+
+    # calls) can derive and use the exact same ABI *before* a lock
+    # exists to ask -- real gap, found in review: an earlier version of
+    # the F1 CLI resolved/classified/derived packages against a
+    # hardcoded ABI constant while only recording the caller-supplied
+    # +ruby_installer_version+ in the lock afterward, so a non-4.0
+    # installer input would resolve under a genuinely different Ruby but
+    # still apply 4.0-series policy throughout. One derivation, reused
+    # everywhere a Ruby ABI series is needed from this same source value,
+    # not two independent copies of the same regex that could drift.
+    #
+    # @param ruby_installer_version [String] e.g. +"4.0.5-1"+
+    # @return [String] e.g. +"4.0"+ from +"4.0.5-1"+
+    # @raise [ValidationError] if +ruby_installer_version+ doesn't match
+    #   the N.N.N-N grammar {#initialize} itself also enforces
+    def self.ruby_abi_for(ruby_installer_version)
+      unless ruby_installer_version.is_a?(String) && RUBY_INSTALLER_VERSION_PATTERN.match?(ruby_installer_version)
+        raise ValidationError,
+              "ruby_installer_version must look like N.N.N-N (e.g. 4.0.5-1), got #{ruby_installer_version.inspect}"
+      end
+
+      ruby_installer_version[/\A(\d+\.\d+)\./, 1]
+    end
+
     # @param ruby_installer_version [String] the exact resolved version this
     #   run bootstrapped, e.g. +"4.0.5-1"+ -- never just the ABI series
     #   (+"4.0"+ is too coarse, per Phase 17 SS8)
@@ -110,7 +137,7 @@ module Ruby4Lich5
     #
     # @return [String] e.g. +"4.0"+ from +"4.0.5-1"+
     def ruby_abi
-      @ruby_installer_version[/\A(\d+\.\d+)\./, 1]
+      self.class.ruby_abi_for(@ruby_installer_version)
     end
 
     # @return [Hash] JSON-serializable, matching this project's existing
@@ -166,10 +193,15 @@ module Ruby4Lich5
     private_constant :RUBY_INSTALLER_VERSION_PATTERN
 
     def validate_ruby_installer_version!
-      return if @ruby_installer_version.is_a?(String) && RUBY_INSTALLER_VERSION_PATTERN.match?(@ruby_installer_version)
-
-      raise ValidationError,
-            "ruby_installer_version must look like N.N.N-N (e.g. 4.0.5-1), got #{@ruby_installer_version.inspect}"
+      # Delegates to {.ruby_abi_for} rather than re-checking the same
+      # RUBY_INSTALLER_VERSION_PATTERN/message inline -- real gap, found
+      # in review: this method and {.ruby_abi_for} had drifted into two
+      # independent copies of the identical format check and identical
+      # error message text, the exact "same rule in two places" risk this
+      # project's own conventions elsewhere already guard against. The
+      # return value is discarded here -- this method's job is only to
+      # validate (raise on bad input), not to report the derived ABI.
+      self.class.ruby_abi_for(@ruby_installer_version)
     end
 
     def validate_registry_identity!

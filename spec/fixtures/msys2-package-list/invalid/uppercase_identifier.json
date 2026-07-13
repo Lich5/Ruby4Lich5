@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "packages": [
+    "mingw-w64-ucrt-x86_64-EXAMPLE"
+  ]
+}

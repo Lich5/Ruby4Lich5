@@ -37,11 +37,17 @@ module Ruby4Lich5
     # @param version [String] exact version to plan for, e.g. +"3.5.6"+
     # @param platform [String] target RubyGems platform tag
     # @param ruby_abi [String] target Ruby ABI series, e.g. +"4.0"+
-    # @return [Array<Hash>] one
-    #   +{name:, version:, classification:, runtime_dependency_names:}+ entry
-    #   per gem that still needs action, in dependency order (leaves first).
-    #   Entries the curation manifest already satisfies are omitted entirely
-    #   -- there's nothing to plan for them.
+    # @return [Array<Hash>] one +{name:, version:, classification:,
+    #   runtime_dependencies:, runtime_dependency_names:}+ entry per gem
+    #   that still needs action, in dependency order (leaves first).
+    #   +runtime_dependencies+ ({name:, requirement:} pairs, a real
+    #   +Gem::Requirement+ per PR C) carried through alongside the
+    #   existing name-only field -- purely additive, PR F1: a caller
+    #   assembling a {ResolutionLock} needs the richer shape;
+    #   {VendoringRoleClassifier}/{glib2_reachability}/{gem_unit_grouper}
+    #   keep working unchanged against +runtime_dependency_names+. Entries
+    #   the curation manifest already satisfies are omitted entirely --
+    #   there's nothing to plan for them.
     # @raise [ClosureResolver::ResolutionError] if the requested gem+version
     #   can't be resolved at all
     # @raise [UnbuildableGemError] if any gem in the closure classifies as
@@ -61,7 +67,7 @@ module Ruby4Lich5
 
         {
           name: node.fetch(:name), version: node.fetch(:version), classification: classification,
-          runtime_dependency_names: node.fetch(:runtime_dependency_names)
+          runtime_dependencies: node.fetch(:runtime_dependencies), runtime_dependency_names: node.fetch(:runtime_dependency_names)
         }
       end
     end

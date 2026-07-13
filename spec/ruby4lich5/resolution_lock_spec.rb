@@ -37,6 +37,37 @@ RSpec.describe Ruby4Lich5::ResolutionLock do
 
       expect(lock.ruby_abi).to eq('10.22')
     end
+
+    # Real regression case, per review: an earlier F1 CLI resolved and
+    # classified everything against a hardcoded '4.0' ABI constant while
+    # only recording whatever ruby_installer_version the caller actually
+    # supplied into the lock afterward -- a non-4.0 input (e.g. a real
+    # future 4.1.x RubyInstaller release) would silently apply 4.0-series
+    # registry/classification policy to a genuinely different Ruby. Not
+    # just a hypothetical: ruby_abi is the value #plan_for/
+    # #self_build_packages_for must actually be called with for this not
+    # to happen, so a passing test here for a plausible non-4.0 release
+    # series is the regression guard.
+    it 'derives a genuinely non-4.0 series correctly, not just the one series this project ships today' do
+      lock = build(ruby_installer_version: '4.1.2-1')
+
+      expect(lock.ruby_abi).to eq('4.1')
+    end
+  end
+
+  describe '.ruby_abi_for' do
+    it 'derives the ABI series without requiring a constructed lock' do
+      expect(described_class.ruby_abi_for('4.0.5-1')).to eq('4.0')
+    end
+
+    it 'derives a non-4.0 series the same way #ruby_abi does' do
+      expect(described_class.ruby_abi_for('4.1.2-1')).to eq('4.1')
+    end
+
+    it 'raises ValidationError, not a raw exception, for a malformed installer version' do
+      expect { described_class.ruby_abi_for('not-a-version') }
+        .to raise_error(described_class::ValidationError, /must look like N\.N\.N-N/)
+    end
   end
 
   describe '#to_h' do

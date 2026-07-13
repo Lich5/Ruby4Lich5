@@ -55,16 +55,16 @@
 require 'json'
 require_relative '../lib/ruby4lich5/build_planner'
 require_relative '../lib/ruby4lich5/curated_gems_seed_builder'
+require_relative '../lib/ruby4lich5/default_root_selection'
 require_relative '../lib/ruby4lich5/msys2_bootstrap'
 require_relative '../lib/ruby4lich5/rubygems_client'
 
-PLATFORM = 'x64-mingw-ucrt'
-RUBY_ABI = '4.0'
-GTK3_VERSION = '4.3.6' # ruby4-bundled-gems-suite.yml's ruby-gnome-version default
-# ruby4-bundled-gems-suite.yml's runtime-gems default, minus gtk3 (handled
-# separately above via ruby-gnome-version, not an ordinary RubyGems.org root).
-RUNTIME_GEMS = %w[sqlite3 ox ascii_charts curses os redis sequel terminal-table kramdown tzinfo tzinfo-data
-                  concurrent-ruby ffi webrick].freeze
+# Real duplication fix, PR F1: PLATFORM/RUBY_ABI/GTK3_VERSION/RUNTIME_GEMS
+# used to be a local copy here, independent of the identical set
+# bin/derive_dynamic_msys2_packages.rb also needs -- both now read from
+# the one canonical source, {Ruby4Lich5::DefaultRootSelection}.
+PLATFORM = Ruby4Lich5::DefaultRootSelection::PLATFORM
+RUBY_ABI = Ruby4Lich5::DefaultRootSelection::RUBY_ABI
 
 # **Real fix, per review 2026-07-13: the legacy uniform MSYS2 list is not
 # copied verbatim into every self-contained entry.** An earlier draft
@@ -124,8 +124,10 @@ rubygems_client = Ruby4Lich5::RubygemsClient.new
 # Real single-source-of-truth fix, PR D: this "latest" selection logic used
 # to be a local, untested duplicate here -- formalized and unit-tested on
 # RubygemsClient itself instead (see its own #latest_version doc comment).
-roots = { 'gtk3' => GTK3_VERSION }
-RUNTIME_GEMS.each { |name| roots[name] = rubygems_client.latest_version(name) }
+# Real single-source-of-truth fix, PR F1: root selection itself (which
+# names, gtk3's special-cased version) now reads from
+# {Ruby4Lich5::DefaultRootSelection} instead of a second local copy.
+roots = Ruby4Lich5::DefaultRootSelection.resolve_versions(rubygems_client: rubygems_client)
 
 puts 'Resolving roots:'
 roots.each { |name, version| puts "  #{name} #{version}" }
