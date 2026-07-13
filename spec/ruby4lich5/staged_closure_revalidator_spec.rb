@@ -16,11 +16,22 @@ RSpec.describe Ruby4Lich5::StagedClosureRevalidator do
     )
   end
 
+  # @param pre_stage_baseline_versions [Hash{String => String}] defaults to
+  #   empty -- most tests below aren't exercising the baseline check at
+  #   all, so an empty "nothing was pre-installed" baseline keeps them
+  #   focused on whichever violation they actually target.
+  def build_revalidator(lock:, staged_member_versions:, target_bundled_gem_versions:, pre_stage_baseline_versions: {})
+    described_class.new(
+      lock: lock, staged_member_versions: staged_member_versions, target_bundled_gem_versions: target_bundled_gem_versions,
+      pre_stage_baseline_versions: pre_stage_baseline_versions
+    )
+  end
+
   describe '#revalidate!' do
     it 'passes when the non-ruby_bundled member is staged at the exact locked version, ruby_bundled is unused' do
       closure = [closure_entry('root-gem', '1.0.0', state: :pure)]
-      revalidator = described_class.new(
-        lock: lock(closure: closure), staged_member_versions: { 'root-gem' => '1.0.0' }, default_gem_versions: {}
+      revalidator = build_revalidator(
+        lock: lock(closure: closure), staged_member_versions: { 'root-gem' => '1.0.0' }, target_bundled_gem_versions: {}
       )
 
       expect { revalidator.revalidate! }.not_to raise_error
@@ -28,7 +39,7 @@ RSpec.describe Ruby4Lich5::StagedClosureRevalidator do
 
     it 'raises when a non-ruby_bundled member is locked but not staged at all' do
       closure = [closure_entry('root-gem', '1.0.0', state: :pure)]
-      revalidator = described_class.new(lock: lock(closure: closure), staged_member_versions: {}, default_gem_versions: {})
+      revalidator = build_revalidator(lock: lock(closure: closure), staged_member_versions: {}, target_bundled_gem_versions: {})
 
       expect { revalidator.revalidate! }
         .to raise_error(described_class::RevalidationFailure, /"root-gem": locked "1\.0\.0" but not staged/)
@@ -36,8 +47,8 @@ RSpec.describe Ruby4Lich5::StagedClosureRevalidator do
 
     it 'raises when a non-ruby_bundled member is staged at a different version than locked' do
       closure = [closure_entry('root-gem', '1.0.0', state: :pure)]
-      revalidator = described_class.new(
-        lock: lock(closure: closure), staged_member_versions: { 'root-gem' => '2.0.0' }, default_gem_versions: {}
+      revalidator = build_revalidator(
+        lock: lock(closure: closure), staged_member_versions: { 'root-gem' => '2.0.0' }, target_bundled_gem_versions: {}
       )
 
       expect { revalidator.revalidate! }
@@ -46,9 +57,9 @@ RSpec.describe Ruby4Lich5::StagedClosureRevalidator do
 
     it 'raises when something is staged that is not in the resolved closure at all' do
       closure = [closure_entry('root-gem', '1.0.0', state: :pure)]
-      revalidator = described_class.new(
+      revalidator = build_revalidator(
         lock: lock(closure: closure), staged_member_versions: { 'root-gem' => '1.0.0', 'extra-gem' => '3.0.0' },
-        default_gem_versions: {}
+        target_bundled_gem_versions: {}
       )
 
       expect { revalidator.revalidate! }
@@ -58,20 +69,44 @@ RSpec.describe Ruby4Lich5::StagedClosureRevalidator do
 
     it 'never compares a ruby_bundled member against staged files at all' do
       closure = [closure_entry('json', '2.7.1', state: :ruby_bundled)]
-      revalidator = described_class.new(
-        lock: lock(closure: closure), staged_member_versions: {}, default_gem_versions: { 'json' => '2.7.1' }
+      revalidator = build_revalidator(
+        lock: lock(closure: closure), staged_member_versions: {}, target_bundled_gem_versions: { 'json' => '2.7.1' }
       )
 
       expect { revalidator.revalidate! }.not_to raise_error
     end
 
-    it 'raises when a ruby_bundled member is not present as a default gem in the bootstrapped Ruby at all' do
+    it 'raises when a ruby_bundled member is not present anywhere in the bootstrapped Ruby at all' do
       closure = [closure_entry('json', '2.7.1', state: :ruby_bundled)]
-      revalidator = described_class.new(lock: lock(closure: closure), staged_member_versions: {}, default_gem_versions: {})
+      revalidator = build_revalidator(lock: lock(closure: closure), staged_member_versions: {}, target_bundled_gem_versions: {})
 
       expect { revalidator.revalidate! }
         .to raise_error(described_class::RevalidationFailure,
-                        /"json": locked as a ruby_bundled default gem, but not present as a default gem in the bootstrapped Ruby/)
+                        /"json": locked as a ruby_bundled gem, but not present anywhere in the bootstrapped Ruby's installed specifications/)
+    end
+
+    # Real gap, found in review: RubyBundledGems.bundled? -- the check that
+    # produces a :ruby_bundled classification in the first place -- is the
+    # *union* of RubyGems' own "default" gems (Gem::Specification#default_gem?
+    # true) and "bundled but not default" gems (present and already
+    # compiled, but never default_gem? -- rake, fiddle, matrix, rexml, the
+    # rest of RubyBundledGems::OTHER_BUNDLED_GEMS). An inventory the caller
+    # built only from default_gem?-flagged specifications would never
+    # contain rake at all, so a real, correctly-classified :ruby_bundled
+    # closure member would be reported "not present" here even though it
+    # genuinely is on disk -- a false revalidation failure, not real drift.
+    # This is exactly why the parameter is target_bundled_gem_versions, not
+    # default_gem_versions: the caller must populate it from *every*
+    # installed specification, not just the default_gem?-flagged subset --
+    # this class itself has no way to enforce that from inside, only a
+    # regression test exercising the exact non-default-gem shape can.
+    it 'accepts a ruby_bundled member that is bundled but never default_gem? (e.g. rake, fiddle, matrix, rexml)' do
+      closure = [closure_entry('rake', '13.2.1', state: :ruby_bundled)]
+      revalidator = build_revalidator(
+        lock: lock(closure: closure), staged_member_versions: {}, target_bundled_gem_versions: { 'rake' => '13.2.1' }
+      )
+
+      expect { revalidator.revalidate! }.not_to raise_error
     end
 
     it "raises when a ruby_bundled member's actual bootstrapped version does not satisfy its own recorded requirement" do
@@ -86,19 +121,19 @@ RSpec.describe Ruby4Lich5::StagedClosureRevalidator do
         closure_entry('json', '2.7.1', state: :ruby_bundled),
         closure_entry('root-gem', '1.0.0', state: :pure, deps: [['json', '>= 2.0']])
       ]
-      revalidator = described_class.new(
+      revalidator = build_revalidator(
         lock: lock(closure: closure, requested_roots: { 'root-gem' => '1.0.0' }),
-        staged_member_versions: { 'root-gem' => '1.0.0' }, default_gem_versions: { 'json' => '1.8.0' }
+        staged_member_versions: { 'root-gem' => '1.0.0' }, target_bundled_gem_versions: { 'json' => '1.8.0' }
       )
 
       expect { revalidator.revalidate! }
         .to raise_error(described_class::RevalidationFailure,
-                        /"json": bootstrapped default-gem version "1\.8\.0" does not satisfy the recorded requirement \(>= 2\.0\)/)
+                        /"json": bootstrapped bundled-gem version "1\.8\.0" does not satisfy the recorded requirement \(>= 2\.0\)/)
     end
 
     it 'checks every requirement recorded against a ruby_bundled member from every root that names it, not just one' do
       # Real gap, found in review: the previous version used the same
-      # default_gem_versions value (2.7.1) that satisfied *both* roots'
+      # target_bundled_gem_versions value (2.7.1) that satisfied *both* roots'
       # requirements, which a buggy implementation checking only the
       # first-found requirement would also have passed -- proving nothing
       # about "every" requirement actually being checked. json's own
@@ -113,14 +148,14 @@ RSpec.describe Ruby4Lich5::StagedClosureRevalidator do
         closure_entry('root-a', '1.0.0', state: :pure, deps: [['json', '>= 2.0']]),
         closure_entry('root-b', '1.0.0', state: :pure, deps: [['json', '< 3.0']])
       ]
-      revalidator = described_class.new(
+      revalidator = build_revalidator(
         lock: lock(closure: closure, requested_roots: { 'root-a' => '1.0.0', 'root-b' => '1.0.0' }),
-        staged_member_versions: { 'root-a' => '1.0.0', 'root-b' => '1.0.0' }, default_gem_versions: { 'json' => '3.1.0' }
+        staged_member_versions: { 'root-a' => '1.0.0', 'root-b' => '1.0.0' }, target_bundled_gem_versions: { 'json' => '3.1.0' }
       )
 
       expect { revalidator.revalidate! }
         .to raise_error(described_class::RevalidationFailure,
-                        /"json": bootstrapped default-gem version "3\.1\.0" does not satisfy the recorded requirement \(< 3\.0\)/)
+                        /"json": bootstrapped bundled-gem version "3\.1\.0" does not satisfy the recorded requirement \(< 3\.0\)/)
     end
 
     it 'collects every violation, not just the first' do
@@ -128,58 +163,112 @@ RSpec.describe Ruby4Lich5::StagedClosureRevalidator do
         closure_entry('json', '2.7.1', state: :ruby_bundled),
         closure_entry('root-gem', '1.0.0', state: :pure, deps: [['json', '>= 2.0']])
       ]
-      revalidator = described_class.new(
+      revalidator = build_revalidator(
         lock: lock(closure: closure, requested_roots: { 'root-gem' => '1.0.0' }),
-        staged_member_versions: {}, default_gem_versions: { 'json' => '1.8.0' }
+        staged_member_versions: {}, target_bundled_gem_versions: { 'json' => '1.8.0' }
       )
 
       expect { revalidator.revalidate! }.to raise_error(described_class::RevalidationFailure) { |error|
         expect(error.message).to include('"root-gem": locked "1.0.0" but not staged')
-        expect(error.message).to include('"json": bootstrapped default-gem version "1.8.0" does not satisfy')
+        expect(error.message).to include('"json": bootstrapped bundled-gem version "1.8.0" does not satisfy')
       }
+    end
+
+    context 'unexplained extra gem (real gap, found in audit 2026-07-13)' do
+      it 'raises when a name present after staging is neither in the pre-stage baseline nor named anywhere in the lock' do
+        # The real scenario this closes: an unpinned live `gem install`
+        # elsewhere in the workflow silently pulled in an undeclared
+        # transitive dependency ("stray-dep") that is neither a lock
+        # closure member (so the non_bundled/bundled checks above never
+        # look at it at all) nor something that was already on this Ruby
+        # before staging started.
+        closure = [closure_entry('root-gem', '1.0.0', state: :pure)]
+        revalidator = build_revalidator(
+          lock: lock(closure: closure), staged_member_versions: { 'root-gem' => '1.0.0' },
+          target_bundled_gem_versions: { 'root-gem' => '1.0.0', 'stray-dep' => '4.2.0' },
+          pre_stage_baseline_versions: {}
+        )
+
+        expect { revalidator.revalidate! }
+          .to raise_error(described_class::RevalidationFailure,
+                          /"stray-dep": installed version "4\.2\.0" is present after staging but was neither in the pre-stage baseline nor named anywhere in the resolved lock/)
+      end
+
+      it 'does not flag a name that was already present in the pre-stage baseline' do
+        # A gem that genuinely shipped with the bootstrapped RubyInstaller
+        # before anything here ever ran (e.g. a default gem the lock never
+        # even needed to name) is explained by the baseline, not drift.
+        closure = [closure_entry('root-gem', '1.0.0', state: :pure)]
+        revalidator = build_revalidator(
+          lock: lock(closure: closure), staged_member_versions: { 'root-gem' => '1.0.0' },
+          target_bundled_gem_versions: { 'root-gem' => '1.0.0', 'preinstalled-gem' => '1.1.1' },
+          pre_stage_baseline_versions: { 'preinstalled-gem' => '1.1.1' }
+        )
+
+        expect { revalidator.revalidate! }.not_to raise_error
+      end
+
+      it 'does not flag a ruby_bundled member that is a real, accounted-for lock closure member' do
+        closure = [closure_entry('json', '2.7.1', state: :ruby_bundled)]
+        revalidator = build_revalidator(
+          lock: lock(closure: closure), staged_member_versions: {}, target_bundled_gem_versions: { 'json' => '2.7.1' },
+          pre_stage_baseline_versions: {}
+        )
+
+        expect { revalidator.revalidate! }.not_to raise_error
+      end
     end
   end
 
   describe 'inventory validation, found in review' do
     # Real gap: both inventories were previously trusted as-is. A nil
-    # default_gem_versions leaked a raw NoMethodError, and a malformed
+    # target_bundled_gem_versions leaked a raw NoMethodError, and a malformed
     # version string leaked a raw ArgumentError from Gem::Version deep
     # inside Gem::Requirement#satisfied_by? -- both confirmed live, both
     # past this class's own promised RevalidationFailure boundary.
     let(:bundled_closure) { [closure_entry('json', '2.7.1', state: :ruby_bundled)] }
 
-    it 'raises RevalidationFailure for a nil default_gem_versions, not a raw NoMethodError' do
-      expect { described_class.new(lock: lock(closure: bundled_closure), staged_member_versions: {}, default_gem_versions: nil) }
-        .to raise_error(described_class::RevalidationFailure, /default_gem_versions must be a Hash, got NilClass/)
+    it 'raises RevalidationFailure for a nil target_bundled_gem_versions, not a raw NoMethodError' do
+      expect { build_revalidator(lock: lock(closure: bundled_closure), staged_member_versions: {}, target_bundled_gem_versions: nil) }
+        .to raise_error(described_class::RevalidationFailure, /target_bundled_gem_versions must be a Hash, got NilClass/)
     end
 
     it 'raises RevalidationFailure for a nil staged_member_versions, not a raw NoMethodError' do
       closure = [closure_entry('root-gem', '1.0.0', state: :pure)]
 
-      expect { described_class.new(lock: lock(closure: closure), staged_member_versions: nil, default_gem_versions: {}) }
+      expect { build_revalidator(lock: lock(closure: closure), staged_member_versions: nil, target_bundled_gem_versions: {}) }
         .to raise_error(described_class::RevalidationFailure, /staged_member_versions must be a Hash, got NilClass/)
     end
 
+    it 'raises RevalidationFailure for a nil pre_stage_baseline_versions, not a raw NoMethodError' do
+      expect {
+        build_revalidator(
+          lock: lock(closure: bundled_closure), staged_member_versions: {}, target_bundled_gem_versions: {},
+          pre_stage_baseline_versions: nil
+        )
+      }.to raise_error(described_class::RevalidationFailure, /pre_stage_baseline_versions must be a Hash, got NilClass/)
+    end
+
     it 'raises RevalidationFailure for a non-Hash inventory (e.g. an Array), not a raw NoMethodError' do
-      expect { described_class.new(lock: lock(closure: bundled_closure), staged_member_versions: {}, default_gem_versions: []) }
-        .to raise_error(described_class::RevalidationFailure, /default_gem_versions must be a Hash, got Array/)
+      expect { build_revalidator(lock: lock(closure: bundled_closure), staged_member_versions: {}, target_bundled_gem_versions: []) }
+        .to raise_error(described_class::RevalidationFailure, /target_bundled_gem_versions must be a Hash, got Array/)
     end
 
     it 'raises RevalidationFailure for a malformed version string, not a raw ArgumentError from Gem::Version' do
       expect {
-        described_class.new(lock: lock(closure: bundled_closure), staged_member_versions: {}, default_gem_versions: { 'json' => 'not-a-version' })
-      }.to raise_error(described_class::RevalidationFailure, /default_gem_versions\["json"\] must be a valid, non-blank RubyGems version, got "not-a-version"/)
+        build_revalidator(lock: lock(closure: bundled_closure), staged_member_versions: {}, target_bundled_gem_versions: { 'json' => 'not-a-version' })
+      }.to raise_error(described_class::RevalidationFailure, /target_bundled_gem_versions\["json"\] must be a valid, non-blank RubyGems version, got "not-a-version"/)
     end
 
     it 'raises RevalidationFailure for a blank version string' do
       expect {
-        described_class.new(lock: lock(closure: bundled_closure), staged_member_versions: {}, default_gem_versions: { 'json' => '' })
-      }.to raise_error(described_class::RevalidationFailure, /default_gem_versions\["json"\] must be a valid, non-blank RubyGems version/)
+        build_revalidator(lock: lock(closure: bundled_closure), staged_member_versions: {}, target_bundled_gem_versions: { 'json' => '' })
+      }.to raise_error(described_class::RevalidationFailure, /target_bundled_gem_versions\["json"\] must be a valid, non-blank RubyGems version/)
     end
 
     it 'raises RevalidationFailure for an unsafe inventory name (path traversal)' do
       expect {
-        described_class.new(lock: lock(closure: bundled_closure), staged_member_versions: {}, default_gem_versions: { '../etc/passwd' => '1.0.0' })
+        build_revalidator(lock: lock(closure: bundled_closure), staged_member_versions: {}, target_bundled_gem_versions: { '../etc/passwd' => '1.0.0' })
       }.to raise_error(described_class::RevalidationFailure, /disallowed characters/)
     end
   end

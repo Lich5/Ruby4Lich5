@@ -14,10 +14,16 @@
 # digest) read already-published, already-verified values, nothing here
 # re-verifies them.
 #
-# <native_names_csv> need not include the GTK3 stack -- this script adds
-# GemManifestGenerator::GTK3_STACK itself, so the one list lives in exactly
-# one place (2026-07-10 review finding: it had drifted into a second,
-# separately-hardcoded PowerShell copy; removed).
+# F2's "resolve once" cutover, extended (2026-07-13 audit finding): root
+# names, ruby_abi, platform, and every closure member's own delivery state
+# (native_self_contained/native_pass_through/pure) all come from the one
+# already-resolved ResolutionLock (bin/resolve_bundle_lock.rb's own output),
+# never from a separate hand-maintained CSV/dispatch-string pair.
+# GemManifestGenerator itself never deserializes a lock (same
+# injection-seam discipline as every other class here) -- this CLI is the
+# one place that translation happens. ruby_bundled closure members are
+# excluded before ever reaching the generator -- they're never staged, and
+# have no delivery state the generator would recognize.
 #
 # <bundle_tag> is *this run's own* release tag (draft, live, or
 # "-candidate") -- never assumed to be the live tag. Real bug, found in
@@ -28,23 +34,25 @@
 # (bin/retarget_gem_manifest.rb), not something this script does.
 #
 # Usage:
-#   ruby bin/generate_gem_manifest.rb <native_names_csv> <pure_names_csv> \
-#     <ruby_abi> <platform> <repo> <bundle_tag> <bundle_filename> \
-#     <bundle_sha256> <pkg_dir> <output_json_path>
+#   ruby bin/generate_gem_manifest.rb <lock_json_path> <repo> <bundle_tag> \
+#     <bundle_filename> <bundle_sha256> <pkg_dir> <output_json_path>
 #
 # Exit status:
 #   0 -- success, output_json_path written.
 #   1 -- GemManifestGenerator::DigestValidationError (a real, deterministic
-#        integrity problem -- a staged pure gem doesn't match RubyGems.org,
-#        or RubyGems.org has nothing to check it against),
-#        NativeGemDigestFetcher::FetchError (a native release's digest
-#        couldn't be read back), InstalledGemClosure::MissingSpecError (a
-#        declared native/pure name has no staged .gem file at all), or
-#        StagedGemSpecFinder::CorruptGemError (a staged .gem file's own
-#        embedded metadata couldn't be read at all) -- do not retry blindly;
-#        all four mean something real needs investigation, not a transient
-#        blip.
-#   2 -- bad ARGV invocation.
+#        integrity problem -- a staged gem doesn't match RubyGems.org, or
+#        RubyGems.org has nothing to check it against),
+#        GemManifestGenerator::UnknownDeliveryStateError (a resolved
+#        closure member's delivery state is missing/unrecognized -- a
+#        lock/staging mismatch), NativeGemDigestFetcher::FetchError (a
+#        native release's digest couldn't be read back),
+#        InstalledGemClosure::MissingSpecError (a declared root has no
+#        staged .gem file at all), or StagedGemSpecFinder::CorruptGemError
+#        (a staged .gem file's own embedded metadata couldn't be read at
+#        all) -- do not retry blindly; all mean something real needs
+#        investigation, not a transient blip.
+#   2 -- bad ARGV invocation, or ResolutionLock::ValidationError (a
+#        malformed lock file).
 
 require 'json'
 require_relative '../lib/ruby4lich5/gem_manifest_generator'
@@ -52,43 +60,40 @@ require_relative '../lib/ruby4lich5/native_gem_digest_fetcher'
 require_relative '../lib/ruby4lich5/rubygems_client'
 require_relative '../lib/ruby4lich5/installed_gem_closure'
 require_relative '../lib/ruby4lich5/staged_gem_spec_finder'
+require_relative '../lib/ruby4lich5/resolution_lock'
 
-ARG_NAMES = %i[native_names_csv pure_names_csv ruby_abi platform repo bundle_tag bundle_filename bundle_sha256
-               pkg_dir output_json_path].freeze
+ARG_NAMES = %i[lock_json_path repo bundle_tag bundle_filename bundle_sha256 pkg_dir output_json_path].freeze
 
 if ARGV.size != ARG_NAMES.size
   warn "Usage: #{$PROGRAM_NAME} #{ARG_NAMES.map { |n| "<#{n}>" }.join(' ')}"
   exit 2
 end
 
-native_names_csv, pure_names_csv, ruby_abi, platform, repo, bundle_tag, bundle_filename, bundle_sha256, pkg_dir,
-  output_json_path = ARGV
+lock_json_path, repo, bundle_tag, bundle_filename, bundle_sha256, pkg_dir, output_json_path = ARGV
 
-native_names = (Ruby4Lich5::GemManifestGenerator::GTK3_STACK + native_names_csv.split(',').map(&:strip).reject(&:empty?)).uniq
-# Filtered against the *fully constructed* native_names (GTK3_STACK included),
-# not just the caller-supplied native_names_csv -- real gap, found in review
-# 2026-07-11: the workflow's own PowerShell side only excludes
-# NATIVE_RUNTIME_GEMS members from pure_names, since it has no knowledge of
-# GTK3_STACK at all (that constant is deliberately Ruby-only). The real
-# runtime-gems default input starts with the bare word "gtk3", which was
-# landing in both lists -- GemManifestGenerator#roots already absorbed the
-# duplication safely (its own `- GTK3_STACK` subtraction, plus
-# InstalledGemClosure's existing request-dedup), so this was never an
-# observable bug in generated output, but it left correctness depending on
-# two unrelated safety nets instead of a clean boundary here.
-pure_names = pure_names_csv.split(',').map(&:strip).reject(&:empty?) - native_names
+begin
+  lock = Ruby4Lich5::ResolutionLock.from_h(JSON.parse(File.read(lock_json_path)))
+rescue JSON::ParserError, Ruby4Lich5::ResolutionLock::ValidationError => e
+  warn "ERROR: #{e.class}: #{e.message}"
+  exit 2
+end
 
-digest_fetcher = Ruby4Lich5::NativeGemDigestFetcher.new(repo: repo, platform: platform)
+root_names = lock.requested_roots.keys
+delivery_states_by_name = lock.closure
+                              .reject { |entry| entry.fetch(:classification).ruby_bundled? }
+                              .each_with_object({}) { |entry, states| states[entry.fetch(:name)] = entry.fetch(:classification).state.to_s }
+
+digest_fetcher = Ruby4Lich5::NativeGemDigestFetcher.new(repo: repo, platform: lock.platform)
 closure_resolver = Ruby4Lich5::InstalledGemClosure.new(
-  requested_names: native_names + pure_names, find_specs: Ruby4Lich5::StagedGemSpecFinder.new(pkg_dir: pkg_dir)
+  requested_names: root_names, find_specs: Ruby4Lich5::StagedGemSpecFinder.new(pkg_dir: pkg_dir)
 )
 
 begin
   generator = Ruby4Lich5::GemManifestGenerator.new(
-    native_names: native_names,
-    pure_names: pure_names,
-    ruby_abi: ruby_abi,
-    platform: platform,
+    root_names: root_names,
+    delivery_states_by_name: delivery_states_by_name,
+    ruby_abi: lock.ruby_abi,
+    platform: lock.platform,
     repo: repo,
     bundle_asset: { tag: bundle_tag, filename: bundle_filename, sha256: bundle_sha256 },
     pkg_dir: pkg_dir,
@@ -97,8 +102,9 @@ begin
     closure_resolver: closure_resolver
   )
   manifest = generator.generate
-rescue Ruby4Lich5::GemManifestGenerator::DigestValidationError, Ruby4Lich5::NativeGemDigestFetcher::FetchError,
-       Ruby4Lich5::InstalledGemClosure::MissingSpecError, Ruby4Lich5::StagedGemSpecFinder::CorruptGemError => e
+rescue Ruby4Lich5::GemManifestGenerator::DigestValidationError, Ruby4Lich5::GemManifestGenerator::UnknownDeliveryStateError,
+       Ruby4Lich5::NativeGemDigestFetcher::FetchError, Ruby4Lich5::InstalledGemClosure::MissingSpecError,
+       Ruby4Lich5::StagedGemSpecFinder::CorruptGemError => e
   warn "ERROR: #{e.class}: #{e.message}"
   exit 1
 end

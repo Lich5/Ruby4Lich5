@@ -20,11 +20,18 @@ module Ruby4Lich5
   #   unit package list    -> the complete, self-contained runtime closure
   #                          reachable from that root, independent of id
   class GemManifestGenerator
-    # Raised when a pure gem's locally-staged digest doesn't match what
-    # RubyGems.org currently reports for that exact name+version, or when
-    # RubyGems.org's own digest is missing/malformed -- a real, deterministic
-    # problem, never papered over (docs/DECISIONS.md Phase 13 SS3).
+    # Raised when a pure or native_pass_through gem's locally-staged digest
+    # doesn't match what RubyGems.org currently reports for that exact
+    # name+version+platform, or when RubyGems.org's own digest is
+    # missing/malformed -- a real, deterministic problem, never papered over
+    # (docs/DECISIONS.md Phase 13 SS3).
     class DigestValidationError < StandardError; end
+
+    # Raised when a resolved closure member has no recorded delivery state,
+    # or one outside {ACCEPTED_DELIVERY_STATES} -- this class never guesses a
+    # default; every staged member must be explicitly accounted for by the
+    # caller's own +delivery_states_by_name+.
+    class UnknownDeliveryStateError < StandardError; end
 
     # The one declared grouping exception -- every other top-level requested
     # name gets its own standalone-by-default unit. Order matters here only
@@ -35,15 +42,31 @@ module Ruby4Lich5
     GTK3_STACK = %w[glib2 gobject-introspection gio2 cairo cairo-gobject pango
                     gdk_pixbuf2 atk gdk3 gtk3].freeze
 
+    # The three delivery kinds a staged closure member can be -- a fourth
+    # real {Classification} state, +ruby_bundled+, never reaches this class
+    # at all (never staged, no artifact; see the caller's own responsibility
+    # to exclude it building +delivery_states_by_name+).
+    #
+    # @return [Array<String>]
+    ACCEPTED_DELIVERY_STATES = %w[native_self_contained native_pass_through pure].freeze
+
     SCHEMA_VERSION = 1
     private_constant :SCHEMA_VERSION
 
-    # @param native_names [Array<String>] top-level requested names that are
-    #   native gems (individually released), e.g. the +native-runtime-gems+
-    #   workflow input, split -- must be a superset of {GTK3_STACK}
-    # @param pure_names [Array<String>] top-level requested names that are
-    #   pure gems, e.g. the +runtime-gems+ workflow input, split, minus
-    #   +native_names+
+    # @param root_names [Array<String>] every top-level requested root name
+    #   -- e.g. a resolved {ResolutionLock}'s own +requested_roots+ keys.
+    #   Includes +"gtk3"+ itself (grouped into the declared "gtk3-runtime"
+    #   unit below, see {#roots}), never its individual {GTK3_STACK}
+    #   sub-members -- those are transitive closure members, not requested
+    #   roots, and are discovered via +excluded_names+/the closure resolver
+    #   the same way they always were.
+    # @param delivery_states_by_name [Hash{String => String}] every staged
+    #   closure member's own locked delivery state -- one of
+    #   {ACCEPTED_DELIVERY_STATES} -- the caller's responsibility to derive
+    #   from a {ResolutionLock}'s own closure (excluding +ruby_bundled+
+    #   members, which are never staged and never appear here). This class
+    #   never deserializes a lock itself, matching every other class in this
+    #   project's own injection-seam discipline.
     # @param excluded_names [Array<String>] passed straight through to
     #   {InstalledGemClosure}
     # @param ruby_abi [String] e.g. +"4.0"+
@@ -63,20 +86,18 @@ module Ruby4Lich5
     #   filename
     # @param native_digest_lookup [#call] +->(name, version) { "sha256:..." }+
     #   -- fetches the already-published, already-verified digest for a
-    #   native gem's own individual release (Phase 12/13 SS2). Real
-    #   implementation is a caller concern (a +gh api+ call); this class
-    #   only declares the shape it needs.
-    # @param rubygems_client [RubygemsClient] used to cross-validate a pure
-    #   gem's locally-computed digest against RubyGems.org's own reported
-    #   value at generation time (Phase 13 SS3)
+    #   native_self_contained gem's own individual release (Phase 12/13
+    #   SS2). Real implementation is a caller concern (a +gh api+ call);
+    #   this class only declares the shape it needs.
+    # @param rubygems_client [RubygemsClient] used to cross-validate a
+    #   pure/native_pass_through gem's locally-computed digest against
+    #   RubyGems.org's own reported value at generation time (Phase 13 SS3)
     # @param closure_resolver [InstalledGemClosure, nil] injected for specs;
     #   defaults to a real one built from the given names/excludes
-    def initialize(native_names:, pure_names:, ruby_abi:, platform:, repo:, bundle_asset:, pkg_dir:,
+    def initialize(root_names:, delivery_states_by_name:, ruby_abi:, platform:, repo:, bundle_asset:, pkg_dir:,
                    native_digest_lookup:, rubygems_client:, excluded_names: [], closure_resolver: nil)
-      raise ArgumentError, 'native_names must include the full GTK3_STACK' unless (GTK3_STACK - native_names).empty?
-
-      @native_names = native_names
-      @pure_names = pure_names
+      @root_names = root_names
+      @delivery_states_by_name = delivery_states_by_name
       @ruby_abi = ruby_abi
       @platform = platform
       @repo = repo
@@ -85,7 +106,7 @@ module Ruby4Lich5
       @native_digest_lookup = native_digest_lookup
       @rubygems_client = rubygems_client
       @closure_resolver = closure_resolver || InstalledGemClosure.new(
-        requested_names: native_names + pure_names, excluded_names: excluded_names
+        requested_names: root_names, excluded_names: excluded_names
       )
     end
 
@@ -102,6 +123,7 @@ module Ruby4Lich5
       @native_digest_cache = {}
 
       closure_nodes = @closure_resolver.resolve
+      validate_delivery_states!(closure_nodes)
       grouped = GemUnitGrouper.new(closure_nodes: closure_nodes, roots: roots).units
       by_name = closure_nodes.each_with_object({}) { |node, index| index[node.fetch(:name)] = node }
 
@@ -113,9 +135,29 @@ module Ruby4Lich5
 
     private
 
+    # Every resolved closure member must carry exactly one accepted
+    # delivery state -- checked here, once the real closure is known,
+    # rather than at construction time (+delivery_states_by_name+ is keyed
+    # by the whole lock's closure; only {#generate} knows which of those
+    # names are actually staged/resolved for *this* run).
+    #
+    # @raise [UnknownDeliveryStateError]
+    def validate_delivery_states!(closure_nodes)
+      bad = closure_nodes.filter_map do |node|
+        name = node.fetch(:name)
+        state = @delivery_states_by_name[name]
+        next if ACCEPTED_DELIVERY_STATES.include?(state)
+
+        "#{name.inspect}: #{state.nil? ? 'no delivery state recorded' : "unrecognized delivery state #{state.inspect}"}"
+      end
+      return if bad.empty?
+
+      raise UnknownDeliveryStateError, "closure member(s) with missing/unrecognized delivery state:\n#{bad.join("\n")}"
+    end
+
     # @return [Array<GemUnitGrouper::Root>]
     def roots
-      ordinary = (@native_names + @pure_names - GTK3_STACK).map do |name|
+      ordinary = (@root_names - GTK3_STACK).map do |name|
         GemUnitGrouper::Root.new(id: name, start_names: [name])
       end
       [GemUnitGrouper::Root.new(id: 'gtk3-runtime', start_names: GTK3_STACK)] + ordinary
@@ -138,10 +180,12 @@ module Ruby4Lich5
     # @param members [Array<String>]
     # @param by_name [Hash{String => Hash}] closure nodes by name
     # @return [Hash] the manifest "artifact" block -- an individual gem
-    #   release for a single native member (the only case where one exists),
-    #   the shared gem-bundle zip otherwise
+    #   release for a single native_self_contained member (the only case
+    #   where one exists -- native_pass_through never gets its own
+    #   individual release, only the shared bundle), the shared gem-bundle
+    #   zip otherwise
     def artifact_for(members, by_name)
-      return bundle_artifact unless members.length == 1 && native?(members.first)
+      return bundle_artifact unless members.length == 1 && individually_published?(members.first)
 
       name = members.first
       version = by_name.fetch(name).fetch(:version)
@@ -167,12 +211,16 @@ module Ruby4Lich5
       name = node.fetch(:name)
       version = node.fetch(:version)
 
-      if native?(name)
+      case delivery_state_for(name)
+      when 'native_self_contained'
         filename = "#{name}-#{version}-#{@platform}.gem"
         digest = native_digest_for(name, version)
-      else
+      when 'native_pass_through'
+        filename = "#{name}-#{version}-#{@platform}.gem"
+        digest = rubygems_verified_digest_for(name, version, filename, rubygems_platform: @platform)
+      when 'pure'
         filename = "#{name}-#{version}.gem"
-        digest = pure_digest_for(name, version, filename)
+        digest = rubygems_verified_digest_for(name, version, filename, rubygems_platform: 'ruby')
       end
 
       { 'name' => name, 'version' => version, 'filename' => filename, 'sha256' => digest }
@@ -195,37 +243,55 @@ module Ruby4Lich5
     end
 
     # @param name [String]
-    # @return [Boolean]
-    def native?(name)
-      @native_names.include?(name)
+    # @return [String] one of {ACCEPTED_DELIVERY_STATES} -- safe to +fetch+
+    #   without rescue here, since {#generate} already validated every
+    #   closure member's name against this same Hash before any of this
+    #   class's other private methods run
+    def delivery_state_for(name)
+      @delivery_states_by_name.fetch(name)
+    end
+
+    # @param name [String]
+    # @return [Boolean] true only for +native_self_contained+ -- the one
+    #   state that gets its own individual R4L5 release when standalone.
+    #   +native_pass_through+ is still an exact target-platform artifact,
+    #   but never an individual release, always the shared bundle.
+    def individually_published?(name)
+      delivery_state_for(name) == 'native_self_contained'
     end
 
     # Computes the real digest of the staged file, then validates it against
-    # RubyGems.org's own reported digest for this exact name+version --
-    # compute, then validate, per docs/DECISIONS.md Phase 13 SS3. Never
+    # RubyGems.org's own reported digest for this exact name+version+platform
+    # -- compute, then validate, per docs/DECISIONS.md Phase 13 SS3. Never
     # copies RubyGems.org's value directly into the manifest without this
     # check: the staged file is what's actually shipped, and only a real
-    # local hash proves it matches what it claims to be.
+    # local hash proves it matches what it claims to be. Shared by +pure+
+    # (+rubygems_platform: 'ruby'+) and +native_pass_through+
+    # (+rubygems_platform: @platform+) -- both are "trust, but verify, an
+    # already-published upstream artifact," differing only in which
+    # platform's published build they're being checked against.
     #
     # @param name [String]
     # @param version [String]
     # @param filename [String]
+    # @param rubygems_platform [String]
     # @return [String] +"sha256:<64 lowercase hex>"+
     # @raise [DigestValidationError]
-    def pure_digest_for(name, version, filename)
+    def rubygems_verified_digest_for(name, version, filename, rubygems_platform:)
       path = File.join(@pkg_dir, filename)
-      raise DigestValidationError, "staged pure gem file not found: #{path}" unless File.exist?(path)
+      raise DigestValidationError, "staged gem file not found: #{path}" unless File.exist?(path)
 
       local_digest = "sha256:#{Digest::SHA256.file(path).hexdigest}"
-      remote_digest = rubygems_digest_for(name, version)
+      remote_digest = rubygems_digest_for(name, version, rubygems_platform)
 
       if remote_digest.nil?
-        raise DigestValidationError, "RubyGems.org has no published version #{version} for #{name} " \
-                                      '(or no digest reported for it) -- refusing to trust an unverifiable staged file'
+        raise DigestValidationError, "RubyGems.org has no published #{rubygems_platform.inspect}-platform version " \
+                                      "#{version} for #{name} (or no digest reported for it) -- refusing to trust " \
+                                      'an unverifiable staged file'
       end
       unless remote_digest == local_digest
         raise DigestValidationError, "#{name} #{version}: staged file hashes to #{local_digest}, but " \
-                                      "RubyGems.org reports #{remote_digest} -- refusing to ship an unverified pure gem"
+                                      "RubyGems.org reports #{remote_digest} -- refusing to ship an unverified gem"
       end
 
       local_digest
@@ -233,12 +299,12 @@ module Ruby4Lich5
 
     # @param name [String]
     # @param version [String]
+    # @param rubygems_platform [String]
     # @return [String, nil] +"sha256:<64 lowercase hex>"+, or +nil+ if
     #   RubyGems.org has no matching, well-formed digest for this exact
-    #   name+version (the +ruby+ platform specifically -- pure gems have no
-    #   other platform)
-    def rubygems_digest_for(name, version)
-      entry = @rubygems_client.versions(name).find { |v| v['number'] == version && v['platform'] == 'ruby' }
+    #   name+version+platform
+    def rubygems_digest_for(name, version, rubygems_platform)
+      entry = @rubygems_client.versions(name).find { |v| v['number'] == version && v['platform'] == rubygems_platform }
       return nil if entry.nil?
 
       sha = entry['sha']
