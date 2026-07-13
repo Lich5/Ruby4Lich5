@@ -1,0 +1,264 @@
+# Non-publishing diagnostic for PR F1 (docs/DECISIONS.md Phase 17 SS8) --
+# proves the dynamic MSYS2 install-list derivation end to end, on a real
+# Windows runner, before anything shipping (PR F2) ever depends on it:
+#
+#   1. Bootstrap the exact target-platform RubyInstaller for real (never a
+#      Gem.platforms mutation on the runner's own host Ruby -- see SS8's
+#      corrected bootstrap-resolution mechanism, 2026-07-13).
+#   2. Run bin/derive_dynamic_msys2_packages.rb (the F1 CLI) *using that
+#      bootstrapped ruby.exe as the interpreter*, against the real,
+#      committed config/curated-gems.json.
+#   3. Run read-msys2-package-list.ps1 (the F1 PowerShell reader) against
+#      the CLI's emitted artifact, and feed the resulting multiline string
+#      into a real msys2/setup-msys2 `with.install:` -- the one
+#      mechanically risky part this whole diagnostic exists to prove:
+#      survival through GitHub Actions' real multiline-output mechanics,
+#      not just that a package list gets printed somewhere.
+#
+# Zero changes to the real, shipping ruby4-bundled-gems-suite.yml --
+# mirrors rubyinstaller-provenance.yml's own "diagnostic, not part of the
+# real pipeline" precedent. Nothing here publishes a release, writes to
+# the repo, or mutates any artifact.
+
+name: MSYS2 package-list derivation diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      ruby-installer-version:
+        description: "RubyInstaller UCRT archive version, for example 4.0.5-1."
+        required: false
+        default: "4.0.5-1"
+
+permissions:
+  contents: read
+
+jobs:
+  derive_and_install:
+    name: Derive dynamic MSYS2 package list (windows-ucrt64)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    env:
+      GEM_PLATFORM: x64-mingw-ucrt
+
+    steps:
+      # Full checkout, not sparse -- unlike rubyinstaller-provenance.yml,
+      # this diagnostic actually runs this repo's own Ruby CLI
+      # (lib/ruby4lich5/*, bin/derive_dynamic_msys2_packages.rb) against
+      # the real, committed config/curated-gems.json, plus the PowerShell
+      # reader and the shared download-verify helper.
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Validate inputs
+        shell: powershell
+        env:
+          RUBY_INSTALLER_VERSION_INPUT: ${{ inputs.ruby-installer-version }}
+        run: |
+          # Read via $env:, not spliced directly into the script text as a
+          # quoted expression -- a single quote in a workflow_dispatch
+          # input could otherwise break out of the string and inject
+          # arbitrary PowerShell before any of the validation below ever
+          # runs.
+          $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION_INPUT
+          if ($rubyInstallerVersion -notmatch '^\d+\.\d+\.\d+-\d+$') {
+            Write-Error "ruby-installer-version must look like N.N.N-N, for example 4.0.5-1; received '$rubyInstallerVersion'."
+            exit 1
+          }
+          "RUBY_INSTALLER_VERSION=$rubyInstallerVersion" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # GH_TOKEN scoped to just this step -- every step after it either
+      # runs entirely locally or executes externally sourced code (7z,
+      # then ruby.exe, then MSYS2's own pacman) and has no business
+      # holding a repo-scoped token while doing it.
+      - name: Resolve RubyInstaller release digest
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION
+          $tag = "RubyInstaller-$rubyInstallerVersion"
+          $archiveName = "rubyinstaller-$rubyInstallerVersion-x64.7z"
+
+          $apiOutput = gh api "repos/oneclick/rubyinstaller2/releases/tags/$tag" 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "gh api failed for release $tag -- $apiOutput"
+            exit 1
+          }
+          $rel = $apiOutput | ConvertFrom-Json
+          $asset = $rel.assets | Where-Object { $_.name -eq $archiveName }
+          if (-not $asset) {
+            Write-Error "Asset $archiveName not found on release $tag."
+            exit 1
+          }
+          if ($asset.digest -notmatch '^sha256:[0-9a-f]{64}$') {
+            Write-Error "RubyInstaller release $tag returned a missing or malformed digest for $archiveName -- got '$($asset.digest)'."
+            exit 1
+          }
+
+          "RUBY_ARCHIVE_URL=$($asset.browser_download_url)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RUBY_ARCHIVE_DIGEST=$($asset.digest)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "RubyInstaller $tag -> $archiveName (sha256 recorded: $($asset.digest))"
+
+      # Same download/verify/extract/validate shape as
+      # rubyinstaller-provenance.yml's own step -- including the same
+      # Gem::Platform.local assertion, which doubles here as live proof
+      # that this bootstrapped Ruby is the real thing the F1 CLI's own
+      # internal fail-fast assertion (Gem.platforms, not
+      # Gem::Platform.local, but the same underlying guarantee) expects.
+      - name: Download, verify, and extract RubyInstaller
+        shell: powershell
+        run: |
+          $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION
+          $rubyParent = Join-Path $env:RUNNER_TEMP 'msys2-package-list-diagnostic'
+          $archive = Join-Path $env:RUNNER_TEMP "rubyinstaller-$rubyInstallerVersion-x64.7z"
+
+          New-Item -ItemType Directory -Path $rubyParent -Force | Out-Null
+
+          . (Join-Path $env:GITHUB_WORKSPACE 'verify-archive-download.ps1')
+          try {
+            Invoke-VerifiedDownload -Url $env:RUBY_ARCHIVE_URL -ExpectedDigest $env:RUBY_ARCHIVE_DIGEST -DestinationPath $archive | Out-Null
+          } catch {
+            Write-Error "RubyInstaller download/verification failed: $($_.Exception.Message)"
+            exit 1
+          }
+          Write-Host "RubyInstaller archive digest verified: $env:RUBY_ARCHIVE_DIGEST"
+
+          $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
+          if (!(Test-Path $sevenZip)) {
+            $sevenZip = '7z.exe'
+          }
+          & $sevenZip x $archive "-o$rubyParent" -y
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "RubyInstaller extraction failed."
+            exit $LASTEXITCODE
+          }
+
+          $rubyExe = Get-ChildItem $rubyParent -Recurse -Filter ruby.exe -File | Where-Object {
+            $_.FullName -match '\\bin\\ruby\.exe$'
+          } | Select-Object -First 1
+          if (-not $rubyExe) {
+            Write-Error "RubyInstaller extraction failed: ruby.exe was not found under $rubyParent."
+            exit 1
+          }
+
+          & $rubyExe.FullName --version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "RubyInstaller validation failed: ruby.exe could not run."
+            exit $LASTEXITCODE
+          }
+
+          $rubyPlatform = & $rubyExe.FullName -e "require 'rubygems'; print Gem::Platform.local.to_s"
+          if ($rubyPlatform -ne $env:GEM_PLATFORM) {
+            Write-Error "RubyInstaller validation failed: expected Ruby platform $env:GEM_PLATFORM, got $rubyPlatform."
+            exit 1
+          }
+
+          "BOOTSTRAPPED_RUBY_EXE=$($rubyExe.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "::notice::RubyInstaller $env:RUBY_INSTALLER_VERSION bootstrapped: digest matched, ruby.exe runs, platform is $rubyPlatform."
+
+      # The F1 CLI itself has zero external gem dependencies (stdlib
+      # json/digest/net-http/tmpdir only, confirmed directly against every
+      # file in its own require chain) -- run straight against the
+      # bootstrapped ruby.exe, no bundle exec, no gem install step needed.
+      - name: Derive dynamic MSYS2 package list
+        shell: powershell
+        run: |
+          $libDir = Join-Path $env:GITHUB_WORKSPACE 'lib'
+          $cliScript = Join-Path $env:GITHUB_WORKSPACE 'bin\derive_dynamic_msys2_packages.rb'
+          $registryPath = Join-Path $env:GITHUB_WORKSPACE 'config\curated-gems.json'
+          $outputPath = Join-Path $env:RUNNER_TEMP 'msys2-package-list.json'
+
+          & $env:BOOTSTRAPPED_RUBY_EXE "-I$libDir" $cliScript $registryPath $env:GITHUB_SHA $env:RUBY_INSTALLER_VERSION $outputPath
+          $cliExit = $LASTEXITCODE
+
+          # Matches bin/derive_dynamic_msys2_packages.rb's own documented
+          # exit-code contract (its header comment): 0 success, 1 possibly
+          # transient (network/ARGV), 2 deterministic (a real environment
+          # or validation failure). Both 1 and 2 are real failures for
+          # this diagnostic's purposes -- the distinction only matters to
+          # a caller deciding whether to retry, which this workflow_dispatch
+          # run is not.
+          if ($cliExit -ne 0) {
+            Write-Error "derive_dynamic_msys2_packages.rb failed with exit code $cliExit -- see the CLI's own stderr output above."
+            exit 1
+          }
+          if (!(Test-Path $outputPath)) {
+            Write-Error "derive_dynamic_msys2_packages.rb reported success but $outputPath was not written."
+            exit 1
+          }
+
+          "PACKAGE_LIST_JSON=$outputPath" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # The one mechanically risky step this whole diagnostic exists to
+      # prove: a derived, multiline package list surviving GitHub Actions'
+      # own output-passing mechanics (the <<delimiter heredoc convention)
+      # into a real msys2/setup-msys2 `with.install:` in the next step.
+      - name: Read package list and emit multiline install output
+        id: read_packages
+        shell: powershell
+        run: |
+          . (Join-Path $env:GITHUB_WORKSPACE 'read-msys2-package-list.ps1')
+          try {
+            $installList = Read-Msys2PackageList -Path $env:PACKAGE_LIST_JSON
+          } catch {
+            Write-Error "Reading the derived package list failed: $($_.Exception.Message)"
+            exit 1
+          }
+
+          Write-Host "Derived install list:`n$installList"
+
+          # A random, per-run delimiter, not a fixed literal like 'EOF' --
+          # GitHub Actions' own documented multiline-output convention;
+          # every package name here is already SafeToken-validated (fixed
+          # charset, no newlines possible), but a per-run GUID delimiter is
+          # correct defense in depth rather than relying on that alone.
+          $delimiter = [guid]::NewGuid().ToString('N')
+          "install<<$delimiter" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $installList | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $delimiter | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Install MSYS2 UCRT build surface (derived list)
+        id: msys2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: UCRT64
+          update: true
+          install: ${{ steps.read_packages.outputs.install }}
+
+      # setup-msys2 itself already fails the workflow if pacman can't
+      # install a listed package (a misspelled or nonexistent name), but
+      # this confirms it directly rather than only trusting that step's
+      # own exit code -- every derived package individually reported
+      # present by pacman, not just "the install step didn't error."
+      # Reuses the already-parsed, already-validated install-list string
+      # from "Read package list" directly (steps.read_packages.outputs.install)
+      # rather than re-parsing the JSON artifact a second time.
+      - name: Verify every derived package is actually installed
+        shell: powershell
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+          INSTALL_LIST: ${{ steps.read_packages.outputs.install }}
+        run: |
+          $pacman = Join-Path $env:MSYS2_LOCATION 'usr\bin\pacman.exe'
+          if (!(Test-Path $pacman)) {
+            Write-Error "pacman.exe not found at $pacman."
+            exit 1
+          }
+
+          $packages = $env:INSTALL_LIST -split "`r?`n" | Where-Object { $_ -ne '' }
+          $missing = @()
+          foreach ($pkg in $packages) {
+            & $pacman -Q $pkg *> $null
+            if ($LASTEXITCODE -ne 0) {
+              $missing += $pkg
+            }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Error "Package(s) in the derived list not reported installed by pacman: $($missing -join ', ')"
+            exit 1
+          }
+          Write-Host "::notice::Every derived package ($($packages.Count) total) confirmed installed via pacman."

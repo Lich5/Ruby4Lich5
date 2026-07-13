@@ -197,6 +197,53 @@ RSpec.describe Ruby4Lich5::CuratedGemRegistry do
         expect(result).not_to eq([])
       end
     end
+
+    # Real regression case, per review: an earlier version of this method
+    # took no ruby_abi parameter at all, hardcoded to CURRENT_RUBY_ABI
+    # ('4.0') internally -- a caller resolving under a genuinely different
+    # Ruby (e.g. a real future 4.1.x RubyInstaller) had no way to ask this
+    # method about that target at all, so it would silently keep answering
+    # against 4.0-series registry entries regardless of what was actually
+    # resolved and classified.
+    describe 'ruby_abi: override -- querying a target other than CURRENT_RUBY_ABI' do
+      let(:registry) do
+        described_class.new(
+          {
+            'schema' => 2,
+            'gems'   => {
+              'example-native-gem' => {
+                'approval'       => 'approved',
+                'bundle_default' => false,
+                'targets'        => {
+                  'x64-mingw-ucrt' => {
+                    '4.0' => {
+                      'expected_classification' => 'pure'
+                    },
+                    '4.1' => {
+                      'expected_classification' => 'native_self_contained',
+                      'msys2_packages'          => ['mingw-w64-ucrt-x86_64-example']
+                    }
+                  }
+                }
+              }
+            }
+          }
+        )
+      end
+
+      it 'queries the given ruby_abi, not CURRENT_RUBY_ABI, when explicitly overridden' do
+        expect(registry.self_build_packages_for('example-native-gem', ruby_abi: '4.1'))
+          .to eq(['mingw-w64-ucrt-x86_64-example'])
+      end
+
+      it 'still defaults to CURRENT_RUBY_ABI when no override is given, matching every existing caller' do
+        expect(registry.self_build_packages_for('example-native-gem')).to be_nil
+      end
+
+      it 'fails closed (returns nil) for a ruby_abi the registry genuinely has no entry for at all' do
+        expect(registry.self_build_packages_for('example-native-gem', ruby_abi: '4.2')).to be_nil
+      end
+    end
   end
 
   describe 'query methods against an unapproved/unknown target' do

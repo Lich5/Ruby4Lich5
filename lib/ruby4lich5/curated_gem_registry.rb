@@ -215,14 +215,27 @@ module Ruby4Lich5
     # and never an unapproved gem -- returns a value.
     #
     # @param gem_name [String]
+    # @param ruby_abi [String] defaults to {CURRENT_RUBY_ABI}, matching
+    #   every existing caller (`KnownNativeGems`, specs) that predates
+    #   target-awareness -- real gap, found in review: the F1 CLI
+    #   (+bin/derive_dynamic_msys2_packages.rb+) resolves and classifies
+    #   its closure against whatever ABI a caller-supplied
+    #   +ruby_installer_version+ actually derives to ({ResolutionLock.ruby_abi_for}),
+    #   but this method had no way to be asked about anything other than
+    #   {CURRENT_RUBY_ABI}, so a non-default ABI run would silently query
+    #   4.0-series registry entries regardless of what was actually
+    #   resolved. An explicit override lets a caller ask about the *real*
+    #   target instead; the default preserves every existing caller's
+    #   behavior unchanged.
     # @return [Array<String>, nil] MSYS2 packages, or +nil+ unless
     #   +gem_name+ is approved as +native_self_contained+ for
-    #   {CURRENT_PLATFORM}/{CURRENT_RUBY_ABI} -- matches
-    #   {KnownNativeGems.packages_for}'s exact contract
-    def self_build_packages_for(gem_name)
-      return nil unless classification_for(gem_name, CURRENT_PLATFORM, CURRENT_RUBY_ABI) == 'native_self_contained'
+    #   {CURRENT_PLATFORM}/+ruby_abi+ -- matches
+    #   {KnownNativeGems.packages_for}'s exact contract when +ruby_abi+ is
+    #   left at its default
+    def self_build_packages_for(gem_name, ruby_abi: CURRENT_RUBY_ABI)
+      return nil unless classification_for(gem_name, CURRENT_PLATFORM, ruby_abi) == 'native_self_contained'
 
-      msys2_packages_for(gem_name, CURRENT_PLATFORM, CURRENT_RUBY_ABI)
+      msys2_packages_for(gem_name, CURRENT_PLATFORM, ruby_abi)
     end
 
     # @return [Array<String>] gem names whose +bundle_default+ is +true+
