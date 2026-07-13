@@ -193,10 +193,15 @@ module Ruby4Lich5
     private_constant :RUBY_INSTALLER_VERSION_PATTERN
 
     def validate_ruby_installer_version!
-      return if @ruby_installer_version.is_a?(String) && RUBY_INSTALLER_VERSION_PATTERN.match?(@ruby_installer_version)
-
-      raise ValidationError,
-            "ruby_installer_version must look like N.N.N-N (e.g. 4.0.5-1), got #{@ruby_installer_version.inspect}"
+      # Delegates to {.ruby_abi_for} rather than re-checking the same
+      # RUBY_INSTALLER_VERSION_PATTERN/message inline -- real gap, found
+      # in review: this method and {.ruby_abi_for} had drifted into two
+      # independent copies of the identical format check and identical
+      # error message text, the exact "same rule in two places" risk this
+      # project's own conventions elsewhere already guard against. The
+      # return value is discarded here -- this method's job is only to
+      # validate (raise on bad input), not to report the derived ABI.
+      self.class.ruby_abi_for(@ruby_installer_version)
     end
 
     def validate_registry_identity!

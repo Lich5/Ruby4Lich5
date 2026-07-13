@@ -151,6 +151,17 @@ begin
   all_packages = (Ruby4Lich5::Msys2Bootstrap::PACKAGES + gem_specific_packages).uniq.sort
 
   artifact = Ruby4Lich5::Msys2PackageListArtifact.new(all_packages)
+
+  # Inside the protected region, not after `end` -- real gap, found in
+  # review: an earlier version wrote the artifact after this begin/rescue
+  # block closed, so a real write failure (missing output directory, no
+  # permission, a full disk) propagated completely uncaught -- no
+  # "ERROR: <class>: <message>" formatting, defeating the header's own
+  # "any unrecognized exception" exit-1 promise (and the StandardError
+  # catch-all added specifically to make that promise true) for the one
+  # step that actually touches the filesystem.
+  File.binwrite(output_json_path, artifact.to_json_bytes)
+  puts "Wrote #{artifact.packages.size} package(s) to #{output_json_path}"
 rescue Ruby4Lich5::ClosureResolver::ResolutionError, Ruby4Lich5::RubygemsClient::RequestError => e
   warn "ERROR: #{e.class}: #{e.message}"
   exit 1
@@ -163,7 +174,16 @@ rescue Ruby4Lich5::ClosureResolver::IncompleteClosureError,
        Ruby4Lich5::Msys2PackageListArtifact::ValidationError => e
   warn "ERROR: #{e.class}: #{e.message}"
   exit 2
+rescue StandardError => e
+  # The header comment above already documents "or any unrecognized
+  # exception" as an exit-1 case -- real gap, found in review: nothing
+  # actually implemented that promise. Without this, an exception outside
+  # every class listed above (a real bug, not a recognized failure mode)
+  # would propagate as a raw, unformatted Ruby backtrace instead of this
+  # CLI's own documented "ERROR: <class>: <message>" contract, even though
+  # Ruby's own default uncaught-exception behavior happens to exit 1
+  # anyway -- this makes the format promise actually true, not just
+  # accidentally-compatible on exit status alone.
+  warn "ERROR: #{e.class}: #{e.message}"
+  exit 1
 end
-
-File.binwrite(output_json_path, artifact.to_json_bytes)
-puts "Wrote #{artifact.packages.size} package(s) to #{output_json_path}"

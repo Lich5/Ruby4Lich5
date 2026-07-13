@@ -33,6 +33,11 @@ RSpec.describe Ruby4Lich5::DefaultRootSelection do
       result = described_class.resolve_versions(rubygems_client: rubygems_client)
 
       expect(result).not_to have_key('cairo')
+      # Not just "the result has no cairo key" -- the stub above answers
+      # any name, so a stray #latest_version('cairo') call whose result
+      # was simply never stored would still pass the key check alone.
+      # This confirms the interaction itself never happens.
+      expect(rubygems_client).not_to have_received(:latest_version).with('cairo')
     end
 
     it 'returns exactly gtk3 plus RUNTIME_GEMS, no more, no fewer' do
