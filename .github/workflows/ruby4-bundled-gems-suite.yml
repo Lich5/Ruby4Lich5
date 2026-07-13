@@ -38,21 +38,13 @@ on:
         required: false
         default: "4.0.5-1"
       ruby-gnome-version:
-        description: "Ruby-GNOME suite version to build from upstream source."
+        description: "Ruby-GNOME suite version to build from upstream source -- also gtk3's own root version for dynamic resolution (F2)."
         required: false
         default: "4.3.6"
-      cairo-version:
-        description: "rcairo version to build from upstream gem source."
-        required: false
-        default: "1.18.5"
       runtime-gems:
         description: "Top-level Lich runtime gems to install from the staged local bundle."
         required: false
         default: "gtk3 sqlite3 ox ascii_charts curses os redis sequel terminal-table kramdown tzinfo tzinfo-data concurrent-ruby ffi webrick"
-      native-runtime-gems:
-        description: "Runtime gems that must be collected as x64-mingw-ucrt binary gems."
-        required: false
-        default: "sqlite3 ox ffi curses"
       diagnostic-mkmf-logs:
         description: "Dump mkmf.log files when native compilation fails."
         required: false
@@ -92,20 +84,23 @@ jobs:
         env:
           RUBY_INSTALLER_VERSION_INPUT: ${{ inputs.ruby-installer-version }}
           RUBY_GNOME_VERSION_INPUT: ${{ inputs.ruby-gnome-version }}
-          CAIRO_VERSION_INPUT: ${{ inputs.cairo-version }}
           RUNTIME_GEMS_INPUT: ${{ inputs.runtime-gems }}
-          NATIVE_RUNTIME_GEMS_INPUT: ${{ inputs.native-runtime-gems }}
           DIAGNOSTIC_MKMF_LOGS_INPUT: ${{ inputs.diagnostic-mkmf-logs }}
         run: |
           # Read via $env:, not spliced directly into the script text as a quoted
           # expression -- a single quote in a workflow_dispatch input could
           # otherwise break out of the string and inject arbitrary PowerShell
           # before any of the validation below ever runs.
+          #
+          # cairo-version/native-runtime-gems retired (F2) -- cairo is
+          # never an independent root (docs/DECISIONS.md, F1's own
+          # DefaultRootSelection), its version comes from the resolved
+          # gtk3 closure alone; native delivery role is derived from the
+          # resolved lock's own classifications (bin/resolve_bundle_lock.rb),
+          # not a separate hand-maintained list.
           $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION_INPUT
           $rubyGnomeVersion = $env:RUBY_GNOME_VERSION_INPUT
-          $cairoVersion = $env:CAIRO_VERSION_INPUT
           $runtimeGems = $env:RUNTIME_GEMS_INPUT
-          $nativeRuntimeGems = $env:NATIVE_RUNTIME_GEMS_INPUT
           $diagnosticMkmfLogs = $env:DIAGNOSTIC_MKMF_LOGS_INPUT
 
           if ($rubyInstallerVersion -notmatch '^\d+\.\d+\.\d+-\d+$') {
@@ -116,16 +111,8 @@ jobs:
             Write-Error "ruby-gnome-version must look like N.N.N; received '$rubyGnomeVersion'."
             exit 1
           }
-          if ($cairoVersion -notmatch '^\d+\.\d+\.\d+$') {
-            Write-Error "cairo-version must look like N.N.N; received '$cairoVersion'."
-            exit 1
-          }
           if ([string]::IsNullOrWhiteSpace($runtimeGems)) {
             Write-Error "runtime-gems must list at least one top-level runtime gem."
-            exit 1
-          }
-          if ([string]::IsNullOrWhiteSpace($nativeRuntimeGems)) {
-            Write-Error "native-runtime-gems must list at least one native runtime gem."
             exit 1
           }
           if ($diagnosticMkmfLogs -notin @('true', 'false')) {
@@ -133,16 +120,178 @@ jobs:
             exit 1
           }
 
+          # Comma-separated, for bin/resolve_bundle_lock.rb's own
+          # documented runtime_gems_csv argument -- the space-separated
+          # dispatch input is this workflow's own format, reformatted
+          # here rather than asking that CLI to guess a delimiter.
+          $runtimeGemsCsv = (($runtimeGems -split '\s+') | Where-Object { $_ }) -join ','
+
           "RUBY_INSTALLER_VERSION=$rubyInstallerVersion" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "RUBY_GNOME_VERSION=$rubyGnomeVersion" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "CAIRO_VERSION=$cairoVersion" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "RUNTIME_GEMS=$runtimeGems" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "NATIVE_RUNTIME_GEMS=$nativeRuntimeGems" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RUNTIME_GEMS_CSV=$runtimeGemsCsv" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "DIAGNOSTIC_MKMF_LOGS=$diagnosticMkmfLogs" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
       # Single source of truth for the MSYS2/MinGW toolchain. The whole job
       # is keyed off this install via steps.msys2.outputs.msys2-location, so
       # there is no second pacman pass into a separate C:\msys64 root.
+      # pacman prints "warning: dependency cycle detected" for libwebp/libtiff
+      # and harfbuzz/freetype during this step -- confirmed real, longstanding,
+      # upstream MSYS2 package-metadata quirk (same exact libwebp/libtiff pair
+      # shows up across multiple real msys2/MSYS2-packages and msys2/MINGW-
+      # packages GitHub issues), not anything in this build. Non-fatal --
+      # pacman picks an install order anyway and every later step depending on
+      # these packages succeeds. Scoped entirely to this build machine's own
+      # package manager; the shipped product never runs pacman at all, it only
+      # ever receives already-compiled .dll files loaded via Windows' own PE
+      # loader -- a completely different mechanism with no shared failure
+      # mode. Investigated and confirmed benign 2026-07-09, not chased further
+      # (upstream MSYS2's own package graph, not ours to fix).
+      # F2's "resolve once" cutover (docs/DECISIONS.md, extended) -- a
+      # dedicated, self-contained RubyInstaller bootstrap just for the
+      # resolution step below, separate from the main toolchain bootstrap
+      # further down ("Download, verify, and extract RubyInstaller") that
+      # the rest of this job's compile/stage steps use. Deliberately not
+      # a reorder of that existing step: this job's later steps have real,
+      # already-working interdependencies on its own env var names and
+      # position, and duplicating a small, cheap bootstrap here is far
+      # lower-risk than restructuring steps that already work. Mirrors
+      # msys2-package-list-diagnostic.yml's own already-proven pattern
+      # exactly (F1) -- resolve once, under a real bootstrapped target
+      # Ruby, before any MSYS2 toolchain exists at all.
+      #
+      # GH_TOKEN scoped to just this step -- every step after it executes
+      # externally sourced code (the downloaded RubyInstaller, then
+      # rubygems.org's own resolution traffic) and has no business
+      # holding a repo-scoped token while doing it.
+      - name: Resolve RubyInstaller release digest (for dynamic bundle resolution)
+        id: resolve-ruby-digest
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $rubyInstallerVersion = $env:RUBY_INSTALLER_VERSION
+          $tag = "RubyInstaller-$rubyInstallerVersion"
+          $archiveName = "rubyinstaller-$rubyInstallerVersion-x64.7z"
+
+          $apiOutput = gh api "repos/oneclick/rubyinstaller2/releases/tags/$tag" 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "gh api failed for release $tag -- $apiOutput"
+            exit 1
+          }
+          $rel = $apiOutput | ConvertFrom-Json
+          $asset = $rel.assets | Where-Object { $_.name -eq $archiveName }
+          if (-not $asset) {
+            Write-Error "Asset $archiveName not found on release $tag."
+            exit 1
+          }
+          if ($asset.digest -notmatch '^sha256:[0-9a-f]{64}$') {
+            Write-Error "RubyInstaller release $tag returned a missing or malformed digest for $archiveName -- got '$($asset.digest)'."
+            exit 1
+          }
+
+          "RESOLVE_RUBY_ARCHIVE_URL=$($asset.browser_download_url)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RESOLVE_RUBY_ARCHIVE_DIGEST=$($asset.digest)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Download, verify, and extract RubyInstaller (for dynamic bundle resolution)
+        shell: powershell
+        run: |
+          $rubyParent = Join-Path $env:RUNNER_TEMP 'resolve-bundle-ruby'
+          $archive = Join-Path $env:RUNNER_TEMP "resolve-rubyinstaller-$env:RUBY_INSTALLER_VERSION-x64.7z"
+
+          New-Item -ItemType Directory -Path $rubyParent -Force | Out-Null
+
+          . (Join-Path $env:GITHUB_WORKSPACE 'verify-archive-download.ps1')
+          try {
+            Invoke-VerifiedDownload -Url $env:RESOLVE_RUBY_ARCHIVE_URL -ExpectedDigest $env:RESOLVE_RUBY_ARCHIVE_DIGEST -DestinationPath $archive | Out-Null
+          } catch {
+            Write-Error "RubyInstaller download/verification failed: $($_.Exception.Message)"
+            exit 1
+          }
+
+          $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
+          if (!(Test-Path $sevenZip)) {
+            $sevenZip = '7z.exe'
+          }
+          & $sevenZip x $archive "-o$rubyParent" -y
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "RubyInstaller extraction failed."
+            exit $LASTEXITCODE
+          }
+
+          $rubyExe = Get-ChildItem $rubyParent -Recurse -Filter ruby.exe -File | Where-Object {
+            $_.FullName -match '\\bin\\ruby\.exe$'
+          } | Select-Object -First 1
+          if (-not $rubyExe) {
+            Write-Error "RubyInstaller extraction failed: ruby.exe was not found under $rubyParent."
+            exit 1
+          }
+
+          & $rubyExe.FullName --version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "RubyInstaller validation failed: ruby.exe could not run."
+            exit $LASTEXITCODE
+          }
+
+          "RESOLVE_BUNDLE_RUBY_EXE=$($rubyExe.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # The one real resolve pass this whole job depends on -- every
+      # later decision step (native prep, runtime staging, revalidation)
+      # consumes this lock, never re-resolving. See
+      # bin/resolve_bundle_lock.rb's own header comment for the full
+      # exit-code contract and why this is a separate CLI from F1's own
+      # fixed-default bin/derive_dynamic_msys2_packages.rb.
+      - name: Derive dynamic bundle resolution (lock + MSYS2 package list)
+        shell: powershell
+        run: |
+          $libDir = Join-Path $env:GITHUB_WORKSPACE 'lib'
+          $cliScript = Join-Path $env:GITHUB_WORKSPACE 'bin\resolve_bundle_lock.rb'
+          $registryPath = Join-Path $env:GITHUB_WORKSPACE 'config\curated-gems.json'
+          $lockPath = Join-Path $env:RUNNER_TEMP 'resolution-lock.json'
+          $packageListPath = Join-Path $env:RUNNER_TEMP 'msys2-package-list.json'
+
+          & $env:RESOLVE_BUNDLE_RUBY_EXE "-I$libDir" $cliScript $registryPath $env:GITHUB_SHA $env:RUBY_INSTALLER_VERSION $env:RUBY_GNOME_VERSION $env:RUNTIME_GEMS_CSV $lockPath $packageListPath
+          $cliExit = $LASTEXITCODE
+
+          # Matches bin/resolve_bundle_lock.rb's own documented exit-code
+          # contract: 0 success, 1 possibly transient (network/ARGV), 2
+          # deterministic (a real environment or validation failure).
+          if ($cliExit -ne 0) {
+            Write-Error "resolve_bundle_lock.rb failed with exit code $cliExit -- see the CLI's own stderr output above."
+            exit 1
+          }
+          if (!(Test-Path $lockPath) -or !(Test-Path $packageListPath)) {
+            Write-Error "resolve_bundle_lock.rb reported success but its output files were not both written."
+            exit 1
+          }
+
+          "RESOLUTION_LOCK=$lockPath" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "PACKAGE_LIST_JSON=$packageListPath" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Same multiline-output mechanism F1's own diagnostic workflow
+      # already proved works on a real Windows PowerShell 5.1 runner --
+      # see read-msys2-package-list.ps1's own doc comment for the full
+      # strict-validation contract this applies before ever handing
+      # anything to setup-msys2.
+      - name: Read package list and emit multiline install output
+        id: read_packages
+        shell: powershell
+        run: |
+          . (Join-Path $env:GITHUB_WORKSPACE 'read-msys2-package-list.ps1')
+          try {
+            $installList = Read-Msys2PackageList -Path $env:PACKAGE_LIST_JSON
+          } catch {
+            Write-Error "Reading the derived package list failed: $($_.Exception.Message)"
+            exit 1
+          }
+
+          Write-Host "Derived install list:`n$installList"
+
+          $delimiter = [guid]::NewGuid().ToString('N')
+          "install<<$delimiter" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $installList | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $delimiter | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       # pacman prints "warning: dependency cycle detected" for libwebp/libtiff
       # and harfbuzz/freetype during this step -- confirmed real, longstanding,
       # upstream MSYS2 package-metadata quirk (same exact libwebp/libtiff pair
@@ -161,21 +310,7 @@ jobs:
         with:
           msystem: UCRT64
           update: true
-          install: >-
-            base-devel
-            make
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-gcc-libs
-            mingw-w64-ucrt-x86_64-binutils
-            mingw-w64-ucrt-x86_64-make
-            mingw-w64-ucrt-x86_64-pkgconf
-            mingw-w64-ucrt-x86_64-libffi
-            mingw-w64-ucrt-x86_64-sqlite3
-            mingw-w64-ucrt-x86_64-gobject-introspection
-            mingw-w64-ucrt-x86_64-gobject-introspection-runtime
-            mingw-w64-ucrt-x86_64-gtk3
-            mingw-w64-ucrt-x86_64-pdcurses
-            mingw-w64-ucrt-x86_64-ncurses
+          install: ${{ steps.read_packages.outputs.install }}
 
       - name: Build sanitized PATH
         id: lanepath
@@ -394,13 +529,93 @@ jobs:
           "RUBY_EXE=$($rubyExe.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "GEM_EXE=$gemExe" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
+      # F2's final revalidation gate (bin/revalidate_staged_bundle.rb) needs
+      # to know what was actually present on this bootstrapped Ruby
+      # *before* any lock-driven install ran -- real gap, found in review
+      # 2026-07-13: without a real captured baseline, that gate could only
+      # ever check a post-stage name against RubyBundledGems (a
+      # hand-maintained list) or the lock's own closure, so a gem installed
+      # live (bypassing the lock, e.g. as an undeclared transitive
+      # dependency of an unpinned `gem install`) would slip through
+      # undetected unless it happened to also be missing from
+      # RubyBundledGems. A real snapshot, taken before anything installs
+      # anything, removes that dependency on RubyBundledGems being
+      # complete -- "was this name here before we started" is a fact, not
+      # a policy list. Deliberately every installed spec (name => highest
+      # version), unfiltered -- the same "every installed specification"
+      # shape bin/revalidate_staged_bundle.rb's own target_bundled_gem_versions
+      # already uses, so the two are directly diffable.
+      - name: Capture pre-stage gem inventory (baseline for final revalidation)
+        shell: powershell
+        run: |
+          $inventoryScript = @(
+            'require "json"',
+            'require "rubygems"',
+            'inventory = Gem::Specification.group_by(&:name).transform_values { |specs| specs.max_by(&:version).version.to_s }',
+            'File.write(ARGV.fetch(0), JSON.generate(inventory))'
+          ) -join "`n"
+          $inventoryScriptPath = Join-Path $env:RUNNER_TEMP 'capture-pre-stage-inventory.rb'
+          Set-Content -Path $inventoryScriptPath -Value $inventoryScript -Encoding ascii
+          $inventoryPath = Join-Path $env:RUNNER_TEMP 'pre-stage-gem-inventory.json'
+          & $env:RUBY_EXE $inventoryScriptPath $inventoryPath
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path $inventoryPath)) {
+            Write-Error "Failed to capture pre-stage gem inventory."
+            exit 1
+          }
+          "PRE_STAGE_GEM_INVENTORY=$inventoryPath" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Download upstream gem sources
         shell: powershell
         env:
           PATH: ${{ steps.lanepath.outputs.path }}
         run: |
           $rubyGnomeVersion = $env:RUBY_GNOME_VERSION
-          $cairoVersion = $env:CAIRO_VERSION
+
+          # cairo-version retired (F2) -- cairo is never an independent
+          # root (docs/DECISIONS.md, F1's own DefaultRootSelection); its
+          # version comes from the one real resolve pass's own resolved
+          # gtk3 closure, recorded in the lock, not a separate dispatch
+          # input that could silently disagree with it.
+          $lock = Get-Content $env:RESOLUTION_LOCK -Raw | ConvertFrom-Json
+          $cairoEntry = $lock.closure | Where-Object { $_.name -eq 'cairo' } | Select-Object -First 1
+          if (-not $cairoEntry) {
+            Write-Error "Source download failed: the resolved lock does not contain a 'cairo' closure member at all."
+            exit 1
+          }
+          $cairoVersion = $cairoEntry.version
+
+          $rubyGnomeGems = @(
+            'glib2',
+            'gobject-introspection',
+            'gio2',
+            'cairo-gobject',
+            'pango',
+            'gdk_pixbuf2',
+            'atk',
+            'gdk3',
+            'gtk3'
+          )
+
+          # Every native_self_contained closure member outside the
+          # Ruby-GNOME source checkout and cairo (both already handled
+          # specially, immediately below) -- e.g. ox/curses. Real bug,
+          # found in review 2026-07-13: NativeGemPreparer#prepare_from_plan
+          # unconditionally normalizes/patches *every* native_self_contained
+          # entry in the whole lock (not just the fixed GTK3 build list),
+          # but this step previously only ever populated source for the
+          # Ruby-GNOME stack plus cairo -- any other native_self_contained
+          # member (there was never a curated-patch-free exemption for
+          # these; NativeGemPreparer#prepare_self_contained always loads
+          # the real gemspec) had no source directory at all, raising
+          # GemspecNormalizer::NormalizationError the first time this ran
+          # against a real closure containing one.
+          $otherSelfContainedNames = @(
+            $lock.closure | Where-Object {
+              $_.classification.state -eq 'native_self_contained' -and
+              ($rubyGnomeGems + @('cairo')) -notcontains $_.name
+            } | ForEach-Object { $_.name } | Sort-Object -Unique
+          )
+
           $work = Join-Path $env:RUNNER_TEMP 'ruby4-bundled-gems'
           $src = Join-Path $work 'src'
           $build = Join-Path $work 'build'
@@ -450,18 +665,13 @@ jobs:
 
           "SOURCE_ROOT=$build" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "PKG_DIR=$pkg" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          # Exposes the exact locked .gem packages fetched below (cairo,
+          # and every "other" native_self_contained member) to later steps
+          # in this same job -- "Build and stage runtime gem bundle"'s own
+          # repack loop reuses these directly instead of a second, live
+          # `gem install` (see that step's own comment for why).
+          "GEM_SRC_ROOT=$src" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-          $rubyGnomeGems = @(
-            'glib2',
-            'gobject-introspection',
-            'gio2',
-            'cairo-gobject',
-            'pango',
-            'gdk_pixbuf2',
-            'atk',
-            'gdk3',
-            'gtk3'
-          )
           foreach ($gemName in $rubyGnomeGems) {
             $from = Join-Path $rubyGnomeRoot $gemName
             $to = Join-Path $build $gemName
@@ -476,6 +686,44 @@ jobs:
           $sourceGemPackages = @{
             'cairo' = $cairoGem
           }
+
+          # Fetch+unpack the exact locked version of every other
+          # native_self_contained member (ox, curses, and any future
+          # additions) the same way cairo already is above -- these are
+          # real, precompiled-extension gems that still need a real
+          # gemspec at $build/<name> for NativeGemPreparer to normalize/
+          # patch, even though they're only ever repacked (never actually
+          # recompiled) by "Build and stage runtime gem bundle" below.
+          foreach ($gemName in $otherSelfContainedNames) {
+            $entry = $lock.closure | Where-Object { $_.name -eq $gemName } | Select-Object -First 1
+            $gemVersion = $entry.version
+
+            Push-Location $src
+            & $env:GEM_EXE fetch $gemName --version $gemVersion --clear-sources --source https://rubygems.org
+            $fetchExit = $LASTEXITCODE
+            Pop-Location
+            $gemPackage = Join-Path $src "$gemName-$gemVersion.gem"
+            if ($fetchExit -ne 0 -or !(Test-Path $gemPackage)) {
+              Write-Error "Source download failed: $gemName $gemVersion gem could not be fetched."
+              exit 1
+            }
+            Push-Location $src
+            & $env:GEM_EXE unpack $gemPackage
+            $unpackExit = $LASTEXITCODE
+            Pop-Location
+            if ($unpackExit -ne 0) {
+              Write-Error "Source download failed: $gemName $gemVersion gem could not be unpacked."
+              exit $unpackExit
+            }
+            $gemRoot = Join-Path $src "$gemName-$gemVersion"
+            if (!(Test-Path $gemRoot)) {
+              Write-Error "Source download failed: $gemName source did not unpack to $gemRoot."
+              exit 1
+            }
+            Copy-Item $gemRoot (Join-Path $build $gemName) -Recurse -Force
+            $sourceGemPackages[$gemName] = $gemPackage
+          }
+
           foreach ($gemName in $sourceGemPackages.Keys) {
             $gemDir = Join-Path $build $gemName
             $gemspec = Join-Path $gemDir "$gemName.gemspec"
@@ -510,52 +758,26 @@ jobs:
             Write-Host "Source normalization: generated $gemspec from $gemPackage"
           }
 
+      # F2's "resolve once" cutover -- consumes the one real resolve pass
+      # ("Derive dynamic bundle resolution" above) instead of calling
+      # BuildPlanner#plan_for itself. bin/prepare_native_gems_from_lock.rb
+      # never talks to RubygemsClient at all (see its own header comment
+      # and NativeGemPreparer#prepare_from_plan's "no live re-resolve"
+      # contract), so the old retry-for-transient-network-errors loop no
+      # longer applies -- every failure here is either a real bug in a
+      # curated patch/gemspec normalization, or the lock/source_root
+      # inputs themselves being wrong, neither of which retrying fixes.
       - name: Prepare native gems (classify, normalize, patch -- Ruby, not ad-hoc PowerShell)
         shell: powershell
         run: |
           $sourceRoot = $env:SOURCE_ROOT
-          $platform = $env:GEM_PLATFORM
-          # ruby-installer-version looks like 4.0.5-1; ruby_abi is just the series (4.0).
-          $rubyAbi = ($env:RUBY_INSTALLER_VERSION -replace '^(\d+\.\d+)\..*$', '$1')
           $planPath = Join-Path $env:RUNNER_TEMP 'native-gems-plan.json'
-          $script = Join-Path $env:GITHUB_WORKSPACE 'bin\prepare_native_gems.rb'
+          $script = Join-Path $env:GITHUB_WORKSPACE 'bin\prepare_native_gems_from_lock.rb'
 
-          # gtk3's own dependency closure already includes every native gem this suite
-          # builds (glib2, gobject-introspection, gio2, cairo, cairo-gobject, pango,
-          # gdk_pixbuf2, atk, gdk3) -- verified directly by resolving it for real against
-          # rubygems.org, not assumed. Requesting gtk3 here replaces what used to be a
-          # hand-maintained, hardcoded gem list with real dependency resolution.
-          #
-          # RubygemsClient has no built-in retry/backoff (confirmed by reading it) -- this
-          # step's resolution/download traffic all goes out over the real network, so wrap
-          # the invocation itself rather than push retry logic into the library for what's
-          # fundamentally a CI-transient-network concern, not a client-correctness one.
-          #
-          # Exit 2 from the script is its own documented "deterministic, do not retry"
-          # signal (IncompleteClosureError/UnbuildableGemError/NormalizationError/
-          # PatchError/GenerationError --
-          # see bin/prepare_native_gems.rb's own header comment) -- retrying one of those
-          # just re-runs the same check against the same already-downloaded bytes three
-          # times, burning the backoff window for a result that can't change. Only exit 1
-          # (ResolutionError, or anything unrecognized) is worth another attempt.
-          $maxAttempts = 3
-          $attempt = 0
-          do {
-            $attempt++
-            & $env:RUBY_EXE $script gtk3 $env:RUBY_GNOME_VERSION $platform $rubyAbi $sourceRoot $planPath
-            $exitCode = $LASTEXITCODE
-            if ($exitCode -eq 2) {
-              break
-            }
-            if ($exitCode -ne 0 -and $attempt -lt $maxAttempts) {
-              $backoffSeconds = 5 * $attempt
-              Write-Host "::warning::Native gem preparation failed (exit $exitCode), attempt $attempt/$maxAttempts -- retrying in ${backoffSeconds}s (rubygems.org resolution/download can hit transient network errors)."
-              Start-Sleep -Seconds $backoffSeconds
-            }
-          } while ($exitCode -ne 0 -and $attempt -lt $maxAttempts)
+          & $env:RUBY_EXE $script $env:RESOLUTION_LOCK $sourceRoot $planPath
+          $exitCode = $LASTEXITCODE
           if ($exitCode -ne 0) {
-            $reason = if ($exitCode -eq 2) { 'deterministic failure, not retried' } else { "failed after $attempt attempt(s)" }
-            Write-Error "Native gem preparation failed (exit $exitCode, $reason)."
+            Write-Error "Native gem preparation failed (exit $exitCode) -- see the CLI's own stderr output above."
             exit $exitCode
           }
           if (!(Test-Path $planPath)) {
@@ -563,26 +785,24 @@ jobs:
             exit 1
           }
 
-          # The build steps below (~line 700+) still build a hardcoded GTK3 gem list.
+          # The build steps below still build a hardcoded GTK3 gem list.
           # Item 7a's own scope was always narrower than that -- the DLL-vendoring/
           # discovery half (which gems get the closure copied into, see the plan-driven
           # $vendoringRoots further down in "Build GTK3 binary gem suite") -- and that
           # part has landed. *Which gems get compiled* in the first place was
           # deliberately deferred, real but separate follow-on work; this guard is
           # the stopgap that shipped instead. Until that generalization happens, the
-          # *native_self_contained* subset of the plan and that hardcoded build list
-          # must agree exactly, or the workflow could silently build a gem the planner
-          # never classified/patched (or skip one it did). Fail loudly on drift instead
-          # of trusting them to stay in sync by hand.
+          # hardcoded build list must still be *contained in* the plan's own
+          # native_self_contained set, or the workflow could silently build a gem
+          # the planner never classified/patched.
           #
-          # Deliberately filtered to native_self_contained only, not every plan
-          # entry: BuildPlanner#plan_for resolves gtk3's *full* dependency closure,
-          # which includes real but non-actionable members too -- pure gems
-          # (rake, pkg-config, matrix, red-colors, native-package-installer) and,
-          # as of 2026-07-07, gems that ship as Ruby default gems already present
-          # in the target install (json, fiddle -- see RubyBundledGems). None of
-          # those need building here; comparing the whole plan against the
-          # 10-gem hardcoded list would fail on their presence for no real reason.
+          # Not an exact-equals check anymore (F2) -- the plan now covers the
+          # *whole* resolved bundle's native_self_contained members in one unified
+          # pass (see bin/prepare_native_gems_from_lock.rb's own doc comment),
+          # which legitimately includes members outside the fixed GTK3 build list
+          # too (e.g. ox/curses, repacked -- not compiled -- by "Build and stage
+          # runtime gem bundle" below, driven by this same plan's own classifications
+          # rather than a separate hardcoded list).
           $planGems = [System.Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
           (Get-Content $planPath -Raw | ConvertFrom-Json) |
             Where-Object { $_.state -eq 'native_self_contained' } |
@@ -591,10 +811,9 @@ jobs:
             [string[]] @('glib2', 'gobject-introspection', 'gio2', 'cairo', 'cairo-gobject', 'pango', 'gdk_pixbuf2', 'atk', 'gdk3', 'gtk3'),
             [StringComparer]::OrdinalIgnoreCase
           )
-          if (-not $planGems.SetEquals($hardcodedBuildGems)) {
-            $missing = @($hardcodedBuildGems | Where-Object { -not $planGems.Contains($_) })
-            $extra = @($planGems | Where-Object { -not $hardcodedBuildGems.Contains($_) })
-            Write-Error "Native gems plan's native_self_contained set no longer matches this workflow's hardcoded GTK3 build list. Missing from plan (still hardcoded below but not classified/patched): $($missing -join ', '); in plan but not built below: $($extra -join ', ')."
+          $missing = @($hardcodedBuildGems | Where-Object { -not $planGems.Contains($_) })
+          if ($missing.Count -gt 0) {
+            Write-Error "Native gems plan's native_self_contained set no longer contains this workflow's hardcoded GTK3 build list. Missing from plan (still hardcoded below but not classified/patched): $($missing -join ',')."
             exit 1
           }
 
@@ -609,6 +828,22 @@ jobs:
           name: native-gems-build-plan
           path: ${{ env.NATIVE_GEMS_PLAN }}
           if-no-files-found: error
+
+      # F2's "resolve once" cutover -- the one real resolve pass this whole
+      # run depends on has to survive the job boundary too: the publish
+      # job (its own fresh runner, no filesystem in common with this one)
+      # needs the same lock to know which native gems it built itself
+      # (native_self_contained -- gets its own R4L5-<name>-<version>-<platform>
+      # release) versus fetched upstream (native_pass_through -- never
+      # republished under this project's own tag), replacing the old
+      # native-runtime-gems input there too.
+      - name: Upload resolution lock (cross-job relay)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: resolution-lock
+          path: ${{ env.RESOLUTION_LOCK }}
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Build GTK3 binary gem suite
         shell: powershell
@@ -666,10 +901,38 @@ jobs:
           & $env:PKG_CONFIG --modversion gtk+-3.0 gobject-introspection-1.0 glib-2.0 gobject-2.0 gio-2.0 cairo pango
           Write-Host "::endgroup::"
 
-          & $gemExe install rake pkg-config native-package-installer
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Build failed: prerequisite build gems could not install."
-            exit $LASTEXITCODE
+          # Installs the exact locked versions of the build-tooling gems,
+          # --local --ignore-dependencies -- real bug, found in review
+          # 2026-07-13: `gem install rake pkg-config native-package-installer`
+          # here resolved live against RubyGems.org (no version pin, no
+          # --ignore-dependencies), which could silently install a newer
+          # version than the lock resolved, or pull in transitive
+          # dependencies the lock never accounted for -- exactly the
+          # drift StagedClosureRevalidator's own unexplained-extra-gem
+          # check exists to catch.
+          $lock = Get-Content $env:RESOLUTION_LOCK -Raw | ConvertFrom-Json
+          $buildToolNames = @('rake', 'pkg-config', 'native-package-installer')
+          foreach ($toolName in $buildToolNames) {
+            $toolEntry = $lock.closure | Where-Object { $_.name -eq $toolName } | Select-Object -First 1
+            if (-not $toolEntry) {
+              Write-Error "Build failed: the resolved lock does not contain a '$toolName' closure member at all."
+              exit 1
+            }
+            $toolVersion = $toolEntry.version
+            Push-Location $env:GEM_SRC_ROOT
+            & $gemExe fetch $toolName --version $toolVersion --clear-sources --source https://rubygems.org
+            $toolFetchExit = $LASTEXITCODE
+            Pop-Location
+            $toolGem = Join-Path $env:GEM_SRC_ROOT "$toolName-$toolVersion.gem"
+            if ($toolFetchExit -ne 0 -or !(Test-Path $toolGem)) {
+              Write-Error "Build failed: locked build-tool gem $toolName $toolVersion could not be fetched."
+              exit 1
+            }
+            & $gemExe install $toolGem --local --ignore-dependencies --force
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Build failed: locked build-tool gem $toolName $toolVersion could not be installed."
+              exit $LASTEXITCODE
+            }
           }
 
           $probeDir = Join-Path $env:RUNNER_TEMP 'ruby4-bundled-gems\mkmf-probe'
@@ -1015,6 +1278,26 @@ jobs:
           path: ${{ env.REQUIRED_LOADS_MANIFEST }}
           if-no-files-found: error
 
+      # F2's "resolve once" cutover -- replaces the old live gem-install
+      # loop (RubyGems' own resolver, deciding transitive dependencies at
+      # install time) and the ad-hoc post-install Gem::Specification
+      # introspection that used to *discover* the runtime manifest after
+      # the fact. The lock already knows the full, exact closure and every
+      # member's classification; this step's only real job is turning
+      # that into verified local .gem artifacts and installing them
+      # --local --ignore-dependencies, in the lock's own dependency order
+      # -- see bin/stage_runtime_gems.rb and LockedArtifactMapBuilder's
+      # own doc comments for the full "sealed pipe" contract.
+      #
+      # native-runtime-gems retired -- delivery role (compiled/repacked
+      # locally vs. fetched as an exact upstream artifact) now comes
+      # entirely from each closure member's own locked classification,
+      # not a separate hand-maintained list. The old hardcoded ox/curses
+      # repack loop is exactly the evidence that list was already not
+      # authoritative (see "Prepare native gems" above); every
+      # native_self_contained member outside the fixed 10-gem GTK3 build
+      # list goes through the identical repack mechanism now, whichever
+      # gems those turn out to be.
       - name: Build and stage runtime gem bundle
         shell: powershell
         env:
@@ -1031,38 +1314,75 @@ jobs:
           $env:MSYSTEM_PREFIX = "/$prefix"
           $env:MINGW_PREFIX = "/$prefix"
 
-          $runtimeGems = @(
-            ($env:RUNTIME_GEMS -split '[,\s]+') |
-              Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-              Sort-Object -Unique
-          )
-          $nativeRuntimeGems = @(
-            ($env:NATIVE_RUNTIME_GEMS -split '[,\s]+') |
-              Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-              Sort-Object -Unique
-          )
-          foreach ($gemName in $nativeRuntimeGems) {
-            if ($runtimeGems -notcontains $gemName) {
-              Write-Error "Runtime bundle failed: native runtime gem $gemName is not present in runtime-gems."
+          $gtk3StackGems = @('glib2', 'gobject-introspection', 'gio2', 'cairo', 'cairo-gobject', 'pango', 'gdk_pixbuf2', 'atk', 'gdk3', 'gtk3')
+
+          # Every closure member the plan (bin/prepare_native_gems_from_lock.rb's
+          # own output, already uploaded/available as $env:NATIVE_GEMS_PLAN)
+          # classified native_self_contained -- the GTK3 stack was already
+          # compiled by "Build GTK3 binary gem suite" above; everything else
+          # in this set (e.g. ox/curses) still needs the repack treatment
+          # below, classification-driven rather than a hardcoded name list.
+          $plan = Get-Content $env:NATIVE_GEMS_PLAN -Raw | ConvertFrom-Json
+          $selfContainedNames = @($plan | Where-Object { $_.state -eq 'native_self_contained' } | ForEach-Object { $_.name })
+          $repackNames = @($selfContainedNames | Where-Object { $gtk3StackGems -notcontains $_ })
+
+          # Seeded with the GTK3 stack's own already-built .gem files --
+          # "Build GTK3 binary gem suite" above already produced these
+          # into $pkgDir; this step never rebuilds them, only verifies (via
+          # bin/stage_runtime_gems.rb -> LockedArtifactMapBuilder) that
+          # what is actually there matches the lock.
+          $builtGemPaths = @{}
+          foreach ($gemName in $gtk3StackGems) {
+            $builtGem = Get-ChildItem -Path $pkgDir -Filter "$gemName-*$env:GEM_PLATFORM.gem" -File |
+              Where-Object { $_.Name -match "^$([regex]::Escape($gemName))-\d.*-$([regex]::Escape($env:GEM_PLATFORM))\.gem$" } |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 1
+            if (-not $builtGem) {
+              Write-Error "Runtime bundle failed: expected prebuilt GTK3-stack gem $gemName was not found in pkg."
               exit 1
             }
+            $builtGemPaths[$gemName] = $builtGem.FullName
           }
 
-          Push-Location $pkgDir
-          foreach ($gemName in $runtimeGems) {
-            & $gemExe install $gemName --clear-sources --source https://rubygems.org --force
+          # Repack every other native_self_contained member the same way
+          # the old hardcoded ox/curses loop did -- take the pure-Ruby-platform
+          # gem already published upstream, re-tag it as this target
+          # platform, no real native compile (these are precompiled,
+          # platform-agnostic-at-the-Ruby-level extensions; the actual
+          # native_self_contained classification just means "we vendor/ship
+          # this ourselves," not "this specific gem needs its own compile
+          # step" -- only the fixed GTK3 stack does).
+          foreach ($gemName in $repackNames) {
+            # Installs the *exact locked* source gem -- real bug, found in
+            # review 2026-07-13: `gem install $gemName` here resolved
+            # live against RubyGems.org (no version pin, no
+            # --ignore-dependencies), so it could silently install a
+            # newer version than the lock resolved, and could pull in
+            # transitive dependencies the lock never accounted for at
+            # all -- exactly the drift StagedClosureRevalidator's own
+            # unexplained-extra-gem check exists to catch. The exact
+            # .gem package was already fetched into $env:GEM_SRC_ROOT by
+            # "Download upstream gem sources" above (same lock-derived
+            # native_self_contained set, same job/filesystem) -- reused
+            # here rather than fetched a second time.
+            $repackEntry = $plan | Where-Object { $_.name -eq $gemName } | Select-Object -First 1
+            if (-not $repackEntry) {
+              Write-Error "Runtime bundle failed: $gemName is not present in the native gems plan at all."
+              exit 1
+            }
+            $repackSourceVersion = $repackEntry.version
+            $repackSourceGem = Join-Path $env:GEM_SRC_ROOT "$gemName-$repackSourceVersion.gem"
+            if (!(Test-Path $repackSourceGem)) {
+              Write-Error ("Runtime bundle failed: expected locked source gem $repackSourceGem was not found -- " + `
+                           '"Download upstream gem sources" should have fetched it.')
+              exit 1
+            }
+            & $gemExe install $repackSourceGem --local --ignore-dependencies --force
             if ($LASTEXITCODE -ne 0) {
-              Pop-Location
-              Write-Error "Runtime bundle failed: gem install $gemName failed."
+              Write-Error "Runtime bundle failed: gem install $gemName $repackSourceVersion (locked source, for repack) failed."
               exit $LASTEXITCODE
             }
-          }
-          Pop-Location
 
-          foreach ($gemName in @('ox', 'curses')) {
-            if ($runtimeGems -notcontains $gemName) {
-              continue
-            }
             $repackScript = @(
               'require "fileutils"',
               'require "rubygems"',
@@ -1107,142 +1427,88 @@ jobs:
               exit 1
             }
             Copy-Item $repackedGem.FullName (Join-Path $pkgDir $repackedGem.Name) -Force
-            & $gemExe install $repackedGem.FullName --local --force
-            if ($LASTEXITCODE -ne 0) {
-              Pop-Location
-              Write-Error "Runtime bundle failed: local install failed for repacked $($repackedGem.Name)."
-              exit $LASTEXITCODE
-            }
             Pop-Location
+            $builtGemPaths[$gemName] = (Join-Path $pkgDir $repackedGem.Name)
           }
 
-          $runtimeGemExcludes = @(
-            'benchmark',
-            'bigdecimal',
-            'debug',
-            'fiddle',
-            'irb',
-            'minitest',
-            'native-package-installer',
-            'nkf',
-            'pkg-config',
-            'power_assert',
-            'racc',
-            'rake',
-            'rbs',
-            'rdoc',
-            'reline',
-            'repl_type_completor',
-            'test-unit',
-            'typeprof',
-            'win32ole'
-          )
-          $env:RUNTIME_GEM_EXCLUDES = $runtimeGemExcludes -join ' '
+          $builtGemPathsJson = Join-Path $env:RUNNER_TEMP 'built-gem-paths.json'
+          ($builtGemPaths | ConvertTo-Json) | Out-File $builtGemPathsJson -Encoding utf8
 
-          $manifestScript = @(
-            'require "rubygems"',
-            'require "set"',
-            'requested = ENV.fetch("RUNTIME_GEMS").split(/[,\s]+/).reject(&:empty?)',
-            'excluded = ENV.fetch("RUNTIME_GEM_EXCLUDES").split(/[,\s]+/).reject(&:empty?).to_set',
-            'queue = requested.dup',
-            'selected = {}',
-            'until queue.empty?',
-            '  name = queue.shift',
-            '  next if name.nil? || name.empty? || excluded.include?(name)',
-            '  specs = Gem::Specification.find_all_by_name(name)',
-            '  spec = specs.reject(&:default_gem?).max_by(&:version) || specs.max_by(&:version)',
-            '  abort("runtime gem manifest failed: installed gem #{name.inspect} was not found") unless spec',
-            '  next if spec.default_gem? || excluded.include?(spec.name) || selected.key?(spec.name)',
-            '  selected[spec.name] = spec',
-            '  spec.runtime_dependencies.each { |dependency| queue << dependency.name unless excluded.include?(dependency.name) || selected.key?(dependency.name) }',
-            'end',
-            'selected.values.sort_by(&:name).each { |spec| puts [spec.name, spec.version.to_s, spec.full_name].join("\t") }'
-          ) -join "`n"
-          $manifestScriptPath = Join-Path $env:RUNNER_TEMP 'runtime-gem-manifest.rb'
-          Set-Content -Path $manifestScriptPath -Value $manifestScript -Encoding ascii
-          $manifestRows = @(& $rubyExe $manifestScriptPath)
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Runtime bundle failed: runtime gem manifest generation failed."
-            exit $LASTEXITCODE
+          $installManifestPath = Join-Path $env:RUNNER_TEMP 'install-manifest.json'
+          $stageScript = Join-Path $env:GITHUB_WORKSPACE 'bin\stage_runtime_gems.rb'
+          & $rubyExe $stageScript $env:RESOLUTION_LOCK $env:GEM_PLATFORM $builtGemPathsJson $installManifestPath
+          $stageExit = $LASTEXITCODE
+          if ($stageExit -ne 0) {
+            Write-Error "Runtime bundle failed: stage_runtime_gems.rb failed with exit code $stageExit -- see the CLI's own stderr output above."
+            exit $stageExit
           }
-
-          # Ask Ruby itself for its gem-cache ABI directory name (e.g. "4.0.0")
-          # rather than deriving it from $env:RUBY_INSTALLER_VERSION -- RubyGems
-          # names this directory after RbConfig::CONFIG['ruby_version'], which is
-          # always X.Y.0 regardless of the exact patch/teeny version, and asking
-          # the real running Ruby is the one source that can't drift out of sync
-          # with a second ABI series (e.g. 3.4.x) if one is ever added alongside
-          # today's 4.0.x.
-          $rubyAbiDir = & $rubyExe -e "print RbConfig::CONFIG['ruby_version']"
-          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($rubyAbiDir)) {
-            Write-Error "Runtime bundle failed: could not determine Ruby's gem-cache ABI directory name."
+          if (!(Test-Path $installManifestPath)) {
+            Write-Error "Runtime bundle failed: stage_runtime_gems.rb reported success but $installManifestPath was not written."
             exit 1
           }
 
-          $cacheRoots = @(
-            (Join-Path $rubyRoot "lib\ruby\gems\$rubyAbiDir\cache"),
-            (Join-Path $env:USERPROFILE ".local\share\gem\ruby\$rubyAbiDir\cache")
-          ) | Where-Object { Test-Path $_ } | Sort-Object -Unique
-          $manifestFiles = [System.Collections.Generic.List[string]]::new()
-          foreach ($gemName in @('glib2', 'gobject-introspection', 'gio2', 'cairo', 'cairo-gobject', 'pango', 'gdk_pixbuf2', 'atk', 'gdk3', 'gtk3')) {
-            $platformGem = Get-ChildItem -Path $pkgDir -Filter "$gemName-*.gem" -File |
-              Where-Object { $_.Name -match "^$([regex]::Escape($gemName))-\d" } |
-              Sort-Object LastWriteTime -Descending |
-              Select-Object -First 1
-            if (-not $platformGem) {
-              Write-Error "Runtime bundle failed: expected prebuilt package gem $gemName was not found in pkg."
-              exit 1
-            }
-            $manifestFiles.Add($platformGem.Name)
-          }
+          # Build-time-only tooling gems -- real, correctly-resolved pure
+          # members of the closure (gtk3's own dependency chain, "Build GTK3
+          # binary gem suite" above's own explicit `gem install rake
+          # pkg-config native-package-installer`), but not something the
+          # shipped product needs installed. The only three that were ever
+          # actually reachable as *non*-ruby_bundled closure members under
+          # the old $runtimeGemExcludes list -- everything else on that old
+          # list was already a ruby_bundled default/bundled gem, which the
+          # lock-driven design excludes from staging automatically.
+          $buildToolingExcludes = @('rake', 'pkg-config', 'native-package-installer')
 
-          foreach ($row in $manifestRows) {
-            if ([string]::IsNullOrWhiteSpace($row)) {
-              continue
-            }
-            $parts = $row -split "`t"
-            $gemName = $parts[0]
-            $fullName = $parts[2]
-            $fileName = "$fullName.gem"
-            $existingPkgGem = Join-Path $pkgDir $fileName
-            if (Test-Path $existingPkgGem) {
-              $manifestFiles.Add($fileName)
-              continue
-            }
-            $sourceGem = $null
-            foreach ($cacheRoot in $cacheRoots) {
-              $candidate = Join-Path $cacheRoot $fileName
-              if (Test-Path $candidate) {
-                $sourceGem = $candidate
-                break
-              }
-            }
-            if (-not $sourceGem) {
-              Write-Error "Runtime bundle failed: manifest selected $fileName for $gemName, but no matching .gem file was found in pkg or RubyGems cache."
-              exit 1
-            }
-            Copy-Item $sourceGem (Join-Path $pkgDir $fileName) -Force
-            $manifestFiles.Add($fileName)
-          }
+          $installManifest = @(Get-Content $installManifestPath -Raw | ConvertFrom-Json)
+          $shippedManifest = @($installManifest | Where-Object { $buildToolingExcludes -notcontains $_.name })
 
-          $manifestFiles = @($manifestFiles | Sort-Object -Unique)
-          foreach ($excluded in $runtimeGemExcludes) {
-            $escaped = [regex]::Escape($excluded)
-            $matches = @($manifestFiles | Where-Object { $_ -match "^$escaped-\d" })
-            if ($matches.Count -gt 0) {
-              Write-Error "Runtime bundle failed: excluded package gem $excluded was selected for shipping: $($matches -join ', ')"
-              exit 1
+          foreach ($entry in $shippedManifest) {
+            & $gemExe install $entry.path --local --ignore-dependencies --force
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Runtime bundle failed: gem install $($entry.name) $($entry.version) (locked artifact, --local --ignore-dependencies) failed."
+              exit $LASTEXITCODE
+            }
+
+            # $entry.path is wherever LockedArtifactMapBuilder actually put
+            # it -- a downloaded pure/pass-through artifact lands in a
+            # per-call RubygemsClient temp directory, not $pkgDir, and a
+            # self-contained artifact may already be in $pkgDir (the GTK3
+            # stack) or a native-repack temp directory (this step's own
+            # repack loop above). $pkgDir is this whole job's one real
+            # staging/packaging directory -- every later step (upload,
+            # smoke, publish) expects every shipped .gem file to actually
+            # be there, not just referenced from wherever it happened to
+            # be downloaded/built.
+            $destPath = Join-Path $pkgDir (Split-Path $entry.path -Leaf)
+            if ($entry.path -ne $destPath) {
+              Copy-Item $entry.path $destPath -Force
             }
           }
 
+          $manifestFiles = @($shippedManifest | ForEach-Object { Split-Path $_.path -Leaf } | Sort-Object -Unique)
           Set-Content -Path (Join-Path $pkgDir 'runtime-gems-manifest.txt') -Value $manifestFiles -Encoding ascii
-          Set-Content -Path (Join-Path $pkgDir 'runtime-gems-install-targets.txt') -Value $runtimeGems -Encoding ascii
+
+          # The literal, ordered install manifest -- relative .gem
+          # filenames only (every one of them already staged directly in
+          # $pkgDir above), in the lock's own dependency order (leaves
+          # first, from stage_runtime_gems.rb's own ordered install
+          # manifest -- $shippedManifest is that same order, just filtered
+          # to drop build-tooling). Real bug, found in review 2026-07-13:
+          # this file previously held the raw top-level root names (e.g.
+          # "gtk3 sqlite3 ox ..."), and both the generated consumer script
+          # and the clean-smoke job below resolved each of those names via
+          # a live `gem install <name>` -- exactly the same live-resolution
+          # risk the "resolve once" cutover exists to close everywhere
+          # else. Both now execute this file's own entries literally, in
+          # order, --local --ignore-dependencies -- never re-resolving
+          # anything RubygemsClient/ClosureResolver already decided.
+          $orderedInstallFiles = @($shippedManifest | ForEach-Object { Split-Path $_.path -Leaf })
+          Set-Content -Path (Join-Path $pkgDir 'runtime-gems-install-targets.txt') -Value $orderedInstallFiles -Encoding ascii
           $installScript = @(
             '@echo off',
             'setlocal',
             'pushd "%~dp0"',
             'for /f "usebackq delims=" %%G in ("runtime-gems-install-targets.txt") do (',
-            '  gem install --local --no-document "%%G"',
+            '  gem install --local --ignore-dependencies --no-document "%%G"',
             '  if errorlevel 1 exit /b 1',
             ')',
             'popd',
@@ -1250,15 +1516,26 @@ jobs:
           ) -join "`r`n"
           Set-Content -Path (Join-Path $pkgDir 'install-runtime-gems.cmd') -Value $installScript -Encoding ascii
 
-          foreach ($gemName in $nativeRuntimeGems) {
-            $platformGem = Get-ChildItem -Path $pkgDir -Filter "$gemName-*$env:GEM_PLATFORM.gem" -File |
-              Where-Object { $_.Name -match "^$([regex]::Escape($gemName))-\d.*-$([regex]::Escape($env:GEM_PLATFORM))\.gem$" } |
-              Sort-Object LastWriteTime -Descending |
-              Select-Object -First 1
-            if (-not $platformGem) {
-              Write-Error "Runtime bundle failed: $gemName installed, but no $env:GEM_PLATFORM binary gem was collected in pkg."
-              exit 1
-            }
+      # F2's final hard gate before packaging/manifest/publishing
+      # (docs/DECISIONS.md Phase 17 SS8 step 7, extended) -- proves what
+      # this run just actually staged/bootstrapped matches the lock
+      # exactly, closing the loop the registry gate only opens (that gate,
+      # inside bin/resolve_bundle_lock.rb, only means something if what it
+      # approved is provably what shipped). Runs under $env:RUBY_EXE --
+      # this job's own real bootstrapped target Ruby, the same one every
+      # install above actually installed into -- not the separate,
+      # temporary Ruby "Derive dynamic bundle resolution" used earlier
+      # purely for resolution. See bin/revalidate_staged_bundle.rb's own
+      # doc comment for why that distinction matters here.
+      - name: Revalidate staged bundle against the resolution lock
+        shell: powershell
+        run: |
+          $script = Join-Path $env:GITHUB_WORKSPACE 'bin\revalidate_staged_bundle.rb'
+          & $env:RUBY_EXE $script $env:RESOLUTION_LOCK $env:GEM_PLATFORM $env:PRE_STAGE_GEM_INVENTORY
+          $revalidateExit = $LASTEXITCODE
+          if ($revalidateExit -ne 0) {
+            Write-Error "Staged-bundle revalidation failed (exit $revalidateExit) -- see the CLI's own stderr output above."
+            exit $revalidateExit
           }
 
       # Relays the built gem bundle to the smoke job below, which runs on its own
@@ -1391,11 +1668,31 @@ jobs:
             }
           }
 
+          # Executes the ordered install manifest literally -- one
+          # relative .gem filename per line, in the lock's own dependency
+          # order -- exactly like install-runtime-gems.cmd (the same file
+          # a real consumer runs) does. Real bug, found in review
+          # 2026-07-13: this used to resolve each top-level root name live
+          # (`gem install --local --no-document --force <names...>`,
+          # letting RubyGems' own resolver pick versions/order), which is
+          # exactly the live-resolution risk the "resolve once" cutover
+          # exists to close everywhere else -- this smoke test is supposed
+          # to prove the *shipped bundle* installs correctly, not that a
+          # live resolve still happens to produce something installable.
           $installTargets = @(Get-Content $installTargetsPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-          Push-Location $pkgDir
-          & $gemExe install --local --no-document --force @installTargets
-          $installExit = $LASTEXITCODE
-          Pop-Location
+          $installExit = 0
+          foreach ($installTarget in $installTargets) {
+            $installTargetPath = Join-Path $pkgDir $installTarget
+            if (!(Test-Path $installTargetPath)) {
+              Write-Error "Clean packaged smoke failed: install manifest entry is missing: $installTargetPath."
+              exit 1
+            }
+            & $gemExe install $installTargetPath --local --ignore-dependencies --no-document --force
+            $installExit = $LASTEXITCODE
+            if ($installExit -ne 0) {
+              break
+            }
+          }
           if ($installExit -ne 0) {
             Write-Error "Clean packaged smoke failed: install targets failed on non-DevKit RubyInstaller."
             exit $installExit
@@ -1529,13 +1826,11 @@ jobs:
       GEM_PLATFORM: x64-mingw-ucrt
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      NATIVE_RUNTIME_GEMS: ${{ inputs.native-runtime-gems }}
-      # Workflow inputs, unlike step-scoped GITHUB_ENV writes, are visible
-      # in every job of the same run -- read directly here rather than
-      # relying on anything the build job set, since that job's own
-      # GITHUB_ENV never crosses the job boundary.
-      RUNTIME_GEMS: ${{ inputs.runtime-gems }}
-      RUBY_INSTALLER_VERSION: ${{ inputs.ruby-installer-version }}
+      # actions/upload-artifact for a single-file path uploads just that
+      # file, preserving only its basename -- the same
+      # resolution-lock.json name the build job's own RESOLUTION_LOCK env
+      # var used, now under this job's own dist/ download path.
+      RESOLUTION_LOCK: ${{ github.workspace }}\dist\resolution-lock.json
 
     steps:
       - name: Download staged runtime gem bundle
@@ -1543,6 +1838,18 @@ jobs:
         with:
           name: ruby4-bundled-gems-windows-ucrt64
           path: dist/pkg
+
+      # native-runtime-gems retired (F2) -- this job needs the same lock
+      # the build job resolved once, to know which native gems it built
+      # itself (native_self_contained) versus fetched upstream
+      # (native_pass_through, never republished under this project's own
+      # R4L5- tag) -- see "Upload resolution lock (cross-job relay)" in
+      # the build job above.
+      - name: Download resolution lock
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: resolution-lock
+          path: dist
 
       # generate_gem_manifest.rb is dependency-free stdlib, same design
       # principle as bin/prepare_native_gems.rb -- doesn't need the target
@@ -1576,14 +1883,15 @@ jobs:
           $sha = $env:GITHUB_SHA
           $escapedPlatform = [regex]::Escape($platform)
 
-          # Same fixed 10-gem GTK3-stack list already used twice elsewhere in this
-          # file (the drift-check guard, the rebuild-after-vendoring step) -- not
-          # a new abstraction, the existing convention.
-          $gtk3StackGems = @('glib2', 'gobject-introspection', 'gio2', 'cairo', 'cairo-gobject', 'pango', 'gdk_pixbuf2', 'atk', 'gdk3', 'gtk3')
-          $nativeRuntimeGems = @(
-            ($env:NATIVE_RUNTIME_GEMS -split '[,\s]+') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          # native-runtime-gems retired (F2) -- every native_self_contained
+          # closure member the resolved lock actually named, not a
+          # separate hand-maintained list (the fixed 10-gem GTK3 stack is
+          # itself always a subset of this set -- see "Prepare native
+          # gems"'s own drift-check guard in the build job above).
+          $lock = Get-Content $env:RESOLUTION_LOCK -Raw | ConvertFrom-Json
+          $nativeGemNames = @(
+            $lock.closure | Where-Object { $_.classification.state -eq 'native_self_contained' } | ForEach-Object { $_.name } | Sort-Object -Unique
           )
-          $nativeGemNames = @($gtk3StackGems + $nativeRuntimeGems | Sort-Object -Unique)
 
           foreach ($gemName in $nativeGemNames) {
             $escaped = [regex]::Escape($gemName)
@@ -1963,10 +2271,14 @@ jobs:
         shell: powershell
         run: |
           $pkgDir = Join-Path $env:GITHUB_WORKSPACE 'dist\pkg'
-          $rubyAbi = ($env:RUBY_INSTALLER_VERSION -replace '^(\d+\.\d+)\..*$', '$1')
-          $nativeNames = ($env:NATIVE_RUNTIME_GEMS -split '[,\s]+') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-          $pureNames = ($env:RUNTIME_GEMS -split '[,\s]+') |
-            Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $nativeNames -notcontains $_ }
+
+          # F2's "resolve once" cutover, extended (2026-07-13 audit finding)
+          # -- root names, ruby_abi, platform, and every closure member's
+          # own delivery state now come entirely from the one resolved
+          # lock (bin/generate_gem_manifest.rb's own doc comment), never a
+          # separately hand-derived native/pure CSV pair built here in
+          # PowerShell.
+          #
           # Named "manifest.json" here, not "R4L5-gem-manifest.json" -- real
           # release-blocking bug, found in review 2026-07-11: gh release
           # upload names the remote asset after the *local file's own
@@ -1979,8 +2291,7 @@ jobs:
           $outPath = Join-Path $env:RUNNER_TEMP 'manifest.json'
 
           & ruby (Join-Path $env:GITHUB_WORKSPACE 'bin\generate_gem_manifest.rb') `
-            ($nativeNames -join ',') ($pureNames -join ',') $rubyAbi $env:GEM_PLATFORM $env:GH_REPO `
-            $env:BUNDLE_TAG $env:BUNDLE_ZIP_NAME $env:BUNDLE_SHA256 $pkgDir $outPath
+            $env:RESOLUTION_LOCK $env:GH_REPO $env:BUNDLE_TAG $env:BUNDLE_ZIP_NAME $env:BUNDLE_SHA256 $pkgDir $outPath
           if ($LASTEXITCODE -ne 0) {
             Write-Error "Gem manifest generation failed (exit $LASTEXITCODE) -- see output above."
             exit $LASTEXITCODE

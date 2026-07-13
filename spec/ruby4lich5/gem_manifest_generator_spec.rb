@@ -24,6 +24,19 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
     File.write(File.join(dir, filename), content)
   end
 
+  # @param names [Array<String>] closure member names to mark as
+  #   'native_self_contained' -- every remaining GTK3_STACK name not passed
+  #   here still needs an explicit entry, so callers list the full set they
+  #   care about; anything absent from +extra+ defaults to GTK3_STACK/self-
+  #   contained, matching this project's real default closure.
+  def delivery_states(self_contained: described_class::GTK3_STACK, pass_through: [], pure: [])
+    {}.tap do |states|
+      self_contained.each { |name| states[name] = 'native_self_contained' }
+      pass_through.each { |name| states[name] = 'native_pass_through' }
+      pure.each { |name| states[name] = 'pure' }
+    end
+  end
+
   let(:rubygems_client) { instance_double(Ruby4Lich5::RubygemsClient) }
   let(:native_digest_lookup) { ->(name, version) { "sha256:native-digest-#{name}-#{version}" } }
   let(:bundle_asset) do
@@ -34,10 +47,10 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
     Dir.mktmpdir('ruby4lich5-manifest-spec-') { |dir| @pkg_dir = dir; example.run }
   end
 
-  def build_generator(native_names:, pure_names:, closure_nodes:)
+  def build_generator(root_names:, delivery_states_by_name:, closure_nodes:)
     described_class.new(
-      native_names: native_names,
-      pure_names: pure_names,
+      root_names: root_names,
+      delivery_states_by_name: delivery_states_by_name,
       ruby_abi: '4.0',
       platform: 'x64-mingw-ucrt',
       repo: 'Lich5/Ruby4Lich5',
@@ -52,8 +65,8 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
   describe '#generate' do
     it 'produces the schema/targets envelope' do
       generator = build_generator(
-        native_names: described_class::GTK3_STACK,
-        pure_names: [],
+        root_names: described_class::GTK3_STACK,
+        delivery_states_by_name: delivery_states,
         closure_nodes: described_class::GTK3_STACK.map { |n| node(n, '4.3.6') }
       )
 
@@ -65,10 +78,21 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
       )
     end
 
-    it 'raises unless native_names is a superset of GTK3_STACK' do
-      expect do
-        build_generator(native_names: ['sqlite3'], pure_names: [], closure_nodes: [node('sqlite3', '2.9.5')])
-      end.to raise_error(ArgumentError, /GTK3_STACK/)
+    it 'raises UnknownDeliveryStateError for a resolved closure member with no recorded delivery state' do
+      generator = build_generator(
+        root_names: ['sqlite3'], delivery_states_by_name: {}, closure_nodes: [node('sqlite3', '2.9.5')]
+      )
+
+      expect { generator.generate }.to raise_error(described_class::UnknownDeliveryStateError, /sqlite3/)
+    end
+
+    it 'raises UnknownDeliveryStateError for a delivery state outside the accepted three' do
+      generator = build_generator(
+        root_names: ['sqlite3'], delivery_states_by_name: { 'sqlite3' => 'native_needs_system_lib' },
+        closure_nodes: [node('sqlite3', '2.9.5')]
+      )
+
+      expect { generator.generate }.to raise_error(described_class::UnknownDeliveryStateError, /native_needs_system_lib/)
     end
 
     context 'the GTK3 stack' do
@@ -86,7 +110,11 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
                                                       .and_return([{ 'number' => version, 'platform' => 'ruby', 'sha' => digest }])
         end
 
-        generator = build_generator(native_names: described_class::GTK3_STACK, pure_names: [], closure_nodes: closure)
+        generator = build_generator(
+          root_names: described_class::GTK3_STACK,
+          delivery_states_by_name: delivery_states(pure: %w[red-colors matrix]),
+          closure_nodes: closure
+        )
         unit = generator.generate['targets'].first['units'].find { |u| u['id'] == 'gtk3-runtime' }
 
         expect(unit['members']).to include(*described_class::GTK3_STACK, 'red-colors', 'matrix')
@@ -104,11 +132,13 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
       end
     end
 
-    context 'a standalone native gem' do
+    context 'a standalone native_self_contained gem' do
       it 'gets its own individual-release artifact, R4L5-prefixed filename' do
         closure = described_class::GTK3_STACK.map { |n| node(n, '4.3.6') } + [node('sqlite3', '2.9.5')]
         generator = build_generator(
-          native_names: described_class::GTK3_STACK + ['sqlite3'], pure_names: [], closure_nodes: closure
+          root_names: described_class::GTK3_STACK + ['sqlite3'],
+          delivery_states_by_name: delivery_states(self_contained: described_class::GTK3_STACK + ['sqlite3']),
+          closure_nodes: closure
         )
 
         unit = generator.generate['targets'].first['units'].find { |u| u['id'] == 'sqlite3' }
@@ -134,9 +164,11 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
         end
         closure = described_class::GTK3_STACK.map { |n| node(n, '4.3.6') } + [node('sqlite3', '2.9.5')]
         generator = described_class.new(
-          native_names: described_class::GTK3_STACK + ['sqlite3'], pure_names: [], ruby_abi: '4.0',
-          platform: 'x64-mingw-ucrt', repo: 'Lich5/Ruby4Lich5', bundle_asset: bundle_asset, pkg_dir: @pkg_dir,
-          native_digest_lookup: counting_lookup, rubygems_client: rubygems_client, closure_resolver: stub_closure(closure)
+          root_names: described_class::GTK3_STACK + ['sqlite3'],
+          delivery_states_by_name: delivery_states(self_contained: described_class::GTK3_STACK + ['sqlite3']),
+          ruby_abi: '4.0', platform: 'x64-mingw-ucrt', repo: 'Lich5/Ruby4Lich5', bundle_asset: bundle_asset,
+          pkg_dir: @pkg_dir, native_digest_lookup: counting_lookup, rubygems_client: rubygems_client,
+          closure_resolver: stub_closure(closure)
         )
 
         generator.generate
@@ -164,9 +196,11 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
         end
         closure = described_class::GTK3_STACK.map { |n| node(n, '4.3.6') } + [node('sqlite3', '2.9.5')]
         generator = described_class.new(
-          native_names: described_class::GTK3_STACK + ['sqlite3'], pure_names: [], ruby_abi: '4.0',
-          platform: 'x64-mingw-ucrt', repo: 'Lich5/Ruby4Lich5', bundle_asset: bundle_asset, pkg_dir: @pkg_dir,
-          native_digest_lookup: changing_lookup, rubygems_client: rubygems_client, closure_resolver: stub_closure(closure)
+          root_names: described_class::GTK3_STACK + ['sqlite3'],
+          delivery_states_by_name: delivery_states(self_contained: described_class::GTK3_STACK + ['sqlite3']),
+          ruby_abi: '4.0', platform: 'x64-mingw-ucrt', repo: 'Lich5/Ruby4Lich5', bundle_asset: bundle_asset,
+          pkg_dir: @pkg_dir, native_digest_lookup: changing_lookup, rubygems_client: rubygems_client,
+          closure_resolver: stub_closure(closure)
         )
 
         first_run_digest = generator.generate['targets'].first['units'].find { |u| u['id'] == 'sqlite3' }['artifact']['sha256']
@@ -175,6 +209,76 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
         expect(first_run_digest).to include('sha256-run-one')
         expect(second_run_digest).to include('sha256-run-two')
         expect(second_run_digest).not_to eq(first_run_digest)
+      end
+    end
+
+    context 'a standalone native_pass_through gem (regression, 2026-07-13 audit finding)' do
+      it 'uses the shared bundle artifact, never an R4L5 individual-release URL' do
+        content = 'fixture sqlite3 x64-mingw-ucrt gem bytes'
+        stage_gem_file(@pkg_dir, 'sqlite3-2.9.5-x64-mingw-ucrt.gem', content)
+        digest = Digest::SHA256.hexdigest(content)
+        allow(rubygems_client).to receive(:versions).with('sqlite3').and_return(
+          [{ 'number' => '2.9.5', 'platform' => 'x64-mingw-ucrt', 'sha' => digest }]
+        )
+
+        closure = described_class::GTK3_STACK.map { |n| node(n, '4.3.6') } + [node('sqlite3', '2.9.5')]
+        generator = build_generator(
+          root_names: described_class::GTK3_STACK + ['sqlite3'],
+          delivery_states_by_name: delivery_states(pass_through: ['sqlite3']),
+          closure_nodes: closure
+        )
+
+        unit = generator.generate['targets'].first['units'].find { |u| u['id'] == 'sqlite3' }
+
+        expect(unit['artifact']).to eq(
+          'url'      => 'https://github.com/Lich5/Ruby4Lich5/releases/download/R4L5-gem-bundle-x64-mingw-ucrt/R4L5-gem-bundle-x64-mingw-ucrt.zip',
+          'filename' => 'R4L5-gem-bundle-x64-mingw-ucrt.zip',
+          'sha256'   => bundle_asset[:sha256],
+          'archive'  => 'zip'
+        )
+      end
+
+      it 'includes the target platform in its package filename, and verifies against the target-platform digest' do
+        content = 'fixture sqlite3 x64-mingw-ucrt gem bytes'
+        stage_gem_file(@pkg_dir, 'sqlite3-2.9.5-x64-mingw-ucrt.gem', content)
+        digest = Digest::SHA256.hexdigest(content)
+        allow(rubygems_client).to receive(:versions).with('sqlite3').and_return(
+          [{ 'number' => '2.9.5', 'platform' => 'ruby', 'sha' => 'f' * 64 },
+           { 'number' => '2.9.5', 'platform' => 'x64-mingw-ucrt', 'sha' => digest }]
+        )
+
+        closure = described_class::GTK3_STACK.map { |n| node(n, '4.3.6') } + [node('sqlite3', '2.9.5')]
+        generator = build_generator(
+          root_names: described_class::GTK3_STACK + ['sqlite3'],
+          delivery_states_by_name: delivery_states(pass_through: ['sqlite3']),
+          closure_nodes: closure
+        )
+
+        unit = generator.generate['targets'].first['units'].find { |u| u['id'] == 'sqlite3' }
+        package = unit['packages'].find { |p| p['name'] == 'sqlite3' }
+
+        expect(package).to eq(
+          'name' => 'sqlite3', 'version' => '2.9.5', 'filename' => 'sqlite3-2.9.5-x64-mingw-ucrt.gem',
+          'sha256' => "sha256:#{digest}"
+        )
+      end
+
+      it 'raises when the staged file only matches the ruby-platform digest, not the target-platform one' do
+        content = 'fixture sqlite3 gem bytes'
+        stage_gem_file(@pkg_dir, 'sqlite3-2.9.5-x64-mingw-ucrt.gem', content)
+        local_digest = Digest::SHA256.hexdigest(content)
+        allow(rubygems_client).to receive(:versions).with('sqlite3').and_return(
+          [{ 'number' => '2.9.5', 'platform' => 'ruby', 'sha' => local_digest }]
+        )
+
+        closure = described_class::GTK3_STACK.map { |n| node(n, '4.3.6') } + [node('sqlite3', '2.9.5')]
+        generator = build_generator(
+          root_names: described_class::GTK3_STACK + ['sqlite3'],
+          delivery_states_by_name: delivery_states(pass_through: ['sqlite3']),
+          closure_nodes: closure
+        )
+
+        expect { generator.generate }.to raise_error(described_class::DigestValidationError, /unverifiable/)
       end
     end
 
@@ -200,9 +304,10 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
         end
         closure = described_class::GTK3_STACK.map { |n| node(n, '4.3.6') }
         generator = described_class.new(
-          native_names: described_class::GTK3_STACK, pure_names: [], ruby_abi: '4.0', platform: 'x64-mingw-ucrt',
-          repo: 'Lich5/Ruby4Lich5', bundle_asset: bundle_asset.merge(sha256: stale_bundle_digest), pkg_dir: @pkg_dir,
-          native_digest_lookup: digest_lookup, rubygems_client: rubygems_client, closure_resolver: stub_closure(closure)
+          root_names: described_class::GTK3_STACK, delivery_states_by_name: delivery_states, ruby_abi: '4.0',
+          platform: 'x64-mingw-ucrt', repo: 'Lich5/Ruby4Lich5', bundle_asset: bundle_asset.merge(sha256: stale_bundle_digest),
+          pkg_dir: @pkg_dir, native_digest_lookup: digest_lookup, rubygems_client: rubygems_client,
+          closure_resolver: stub_closure(closure)
         )
 
         unit = generator.generate['targets'].first['units'].find { |u| u['id'] == 'gtk3-runtime' }
@@ -223,8 +328,8 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
                              filename: 'R4L5-gem-bundle-x64-mingw-ucrt.zip', sha256: 'sha256:' + ('9' * 64) }
         closure = described_class::GTK3_STACK.map { |n| node(n, '4.3.6') }
         generator = described_class.new(
-          native_names: described_class::GTK3_STACK, pure_names: [], ruby_abi: '4.0', platform: 'x64-mingw-ucrt',
-          repo: 'Lich5/Ruby4Lich5', bundle_asset: candidate_asset, pkg_dir: @pkg_dir,
+          root_names: described_class::GTK3_STACK, delivery_states_by_name: delivery_states, ruby_abi: '4.0',
+          platform: 'x64-mingw-ucrt', repo: 'Lich5/Ruby4Lich5', bundle_asset: candidate_asset, pkg_dir: @pkg_dir,
           native_digest_lookup: native_digest_lookup, rubygems_client: rubygems_client, closure_resolver: stub_closure(closure)
         )
 
@@ -253,7 +358,9 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
         closure = described_class::GTK3_STACK.map { |n| node(n, '4.3.6') } +
                   [node('tzinfo', '2.0.6', ['concurrent-ruby']), node('concurrent-ruby', '1.3.7')]
         generator = build_generator(
-          native_names: described_class::GTK3_STACK, pure_names: %w[tzinfo concurrent-ruby], closure_nodes: closure
+          root_names: described_class::GTK3_STACK + %w[tzinfo concurrent-ruby],
+          delivery_states_by_name: delivery_states(pure: %w[tzinfo concurrent-ruby]),
+          closure_nodes: closure
         )
 
         unit = generator.generate['targets'].first['units'].find { |u| u['id'] == 'tzinfo' }
@@ -283,7 +390,7 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
 
         closure = described_class::GTK3_STACK.map { |n| node(n, '4.3.6') } + [node('os', '1.1.4')]
         generator = build_generator(
-          native_names: described_class::GTK3_STACK, pure_names: ['os'], closure_nodes: closure
+          root_names: described_class::GTK3_STACK + ['os'], delivery_states_by_name: delivery_states(pure: ['os']), closure_nodes: closure
         )
         local_digest = "sha256:#{Digest::SHA256.hexdigest(tampered_content)}"
 
@@ -302,7 +409,7 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
 
         closure = described_class::GTK3_STACK.map { |n| node(n, '4.3.6') } + [node('os', '1.1.4')]
         generator = build_generator(
-          native_names: described_class::GTK3_STACK, pure_names: ['os'], closure_nodes: closure
+          root_names: described_class::GTK3_STACK + ['os'], delivery_states_by_name: delivery_states(pure: ['os']), closure_nodes: closure
         )
 
         expect { generator.generate }.to raise_error(described_class::DigestValidationError, /unverifiable/)
@@ -313,7 +420,7 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
       it 'raises DigestValidationError naming the missing path' do
         closure = described_class::GTK3_STACK.map { |n| node(n, '4.3.6') } + [node('os', '1.1.4')]
         generator = build_generator(
-          native_names: described_class::GTK3_STACK, pure_names: ['os'], closure_nodes: closure
+          root_names: described_class::GTK3_STACK + ['os'], delivery_states_by_name: delivery_states(pure: ['os']), closure_nodes: closure
         )
 
         expect { generator.generate }.to raise_error(described_class::DigestValidationError, /not found/)

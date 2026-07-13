@@ -30,7 +30,15 @@ module ClosureFixtures
     {
       name: name, version: version,
       runtime_dependencies: deps.map { |dep_name, req| { name: dep_name, requirement: Gem::Requirement.new(req || '>= 0') } },
-      classification: classification(state, **classification_overrides)
+      # Real gap, found in audit 2026-07-13: this used to always build the
+      # classification with a placeholder gem_name/gem_version ("unused"/
+      # "1.0.0"), regardless of this entry's own real name/version --
+      # harmless while nothing ever checked the two agreed, but exactly
+      # the shape ResolutionLock.deserialize_closure_entry's own identity
+      # invariant now enforces. Defaults to matching this entry's own
+      # name/version; classification_overrides can still force a mismatch
+      # for a test that specifically wants one.
+      classification: classification(state, gem_name: name, gem_version: version, **classification_overrides)
     }
   end
 end

@@ -84,6 +84,56 @@ module Ruby4Lich5
     #   patch doesn't apply cleanly against its actual extracted source
     def prepare(gem_name, version, platform:, ruby_abi:, source_root:)
       plan = @build_planner.plan_for(gem_name, version, platform: platform, ruby_abi: ruby_abi)
+      prepare_from_plan(plan, platform: platform, source_root: source_root)
+    end
+
+    # The locked-input counterpart to {#prepare} -- takes an already-resolved
+    # plan instead of calling {BuildPlanner#plan_for} itself, so a caller
+    # holding a real {ResolutionLock} (built once, elsewhere, per
+    # docs/DECISIONS.md's "resolve once" cutover) can normalize/patch the
+    # GTK subset of that same lock without a second, independent live
+    # resolve -- the exact "structurally impossible to reach a live
+    # resolve" guarantee {StagedClosureRevalidator} already relies on,
+    # extended to this class.
+    #
+    # @param plan [Array<Hash>] {BuildPlanner#plan_for}'s own output shape
+    #   (+{name:, version:, classification:, runtime_dependencies:,
+    #   runtime_dependency_names:}+ per entry, dependency order) -- a
+    #   {ResolutionLock}'s +#closure+ carries the first four but not
+    #   +runtime_dependency_names+; the caller translating a lock's closure
+    #   into this shape is responsible for deriving it
+    #   (+runtime_dependencies.map { |d| d.fetch(:name) }+) before calling
+    #   this, matching {ClosureMerger}'s own documented shape contract
+    #   rather than this class silently accepting a narrower Hash and
+    #   raising a confusing +KeyError+ deep inside
+    #   {VendoringRoleClassifier#classify}
+    # @param platform [String] target RubyGems platform tag
+    # @param source_root [String] same contract as {#prepare}'s own
+    #   +source_root+
+    # @return [Array<Hash>] same shape as {#prepare}'s own return value
+    # @raise [BuildPlanner::UnbuildableGemError] if any plan entry
+    #   classifies as +:native_needs_system_lib+ -- real gap, found in
+    #   review: {#prepare} gets this check for free from
+    #   {BuildPlanner#plan_for} itself (it raises before ever returning a
+    #   plan containing one), but a plan built elsewhere (a lock's own
+    #   closure) was never passed through that same check, so this method
+    #   re-asserts it explicitly rather than silently normalizing/patching
+    #   a gem this project already knows cannot be built
+    # @raise [GemspecNormalizer::NormalizationError] see {#prepare}
+    # @raise [PatchApplier::PatchError] see {#prepare}
+    def prepare_from_plan(plan, platform:, source_root:)
+      unbuildable = plan.select { |entry| entry.fetch(:classification).needs_system_lib? }
+      unless unbuildable.empty?
+        # Matches BuildPlanner#plan_for's own "name version: reason" message
+        # shape exactly, one entry per line -- same wording a caller would
+        # have seen from #prepare on the identical classification, just
+        # covering every unbuildable entry at once rather than only the
+        # first (a lock's plan is already fully resolved, so there is no
+        # reason to make a caller fix one and re-run to discover the next).
+        names = unbuildable.map { |entry| "#{entry.fetch(:name)} #{entry.fetch(:version)}: #{entry.fetch(:classification).reason}" }
+        raise BuildPlanner::UnbuildableGemError, "plan contains unbuildable gem(s):\n#{names.join("\n")}"
+      end
+
       vendoring_roles = @vendoring_role_classifier.classify(plan)
 
       plan.map { |entry| prepare_one(entry, platform: platform, source_root: source_root, vendoring_roles: vendoring_roles, plan: plan) }

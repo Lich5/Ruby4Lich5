@@ -35,6 +35,25 @@ module Ruby4Lich5
     SCHEMA_VERSION = 1
     private_constant :SCHEMA_VERSION
 
+    # Exact allowed field sets for {.from_h}'s own deserialization, one per
+    # nesting level, matching {#to_h}/{#serialize_closure_entry}'s own
+    # output shape precisely -- real gap, found in audit 2026-07-13: an
+    # unrecognized field anywhere in a hand-edited or version-drifted lock
+    # document previously passed through silently (JSON.parse itself never
+    # rejects unknown keys), rather than failing closed the way this
+    # project's other strict-schema boundaries already do (e.g.
+    # CuratedGemRegistry's own allowed-keys check).
+    ALLOWED_TOP_LEVEL_KEYS = %w[schema ruby_installer_version platform requested_roots closure registry].freeze
+    private_constant :ALLOWED_TOP_LEVEL_KEYS
+    ALLOWED_REGISTRY_KEYS = %w[commit_sha content_digest].freeze
+    private_constant :ALLOWED_REGISTRY_KEYS
+    ALLOWED_CLOSURE_ENTRY_KEYS = %w[name version runtime_dependencies classification].freeze
+    private_constant :ALLOWED_CLOSURE_ENTRY_KEYS
+    ALLOWED_CLASSIFICATION_KEYS = %w[state gem_name gem_version reason platform_asset msys2_packages].freeze
+    private_constant :ALLOWED_CLASSIFICATION_KEYS
+    ALLOWED_DEPENDENCY_KEYS = %w[name requirement].freeze
+    private_constant :ALLOWED_DEPENDENCY_KEYS
+
     attr_reader :ruby_installer_version, :platform, :requested_roots, :closure,
                 :registry_commit_sha, :registry_content_digest
 
@@ -141,7 +160,10 @@ module Ruby4Lich5
     end
 
     # @return [Hash] JSON-serializable, matching this project's existing
-    #   small-JSON-hand-off convention (e.g. {CuratedGemsSeedBuilder#build})
+    #   small-JSON-hand-off convention (e.g. {CuratedGemsSeedBuilder#build}).
+    #   Lossless -- round-trips through {.from_h} back into an equivalent
+    #   lock, every +Classification+ field included, not just +state+ (see
+    #   {.from_h}'s own doc comment for why this matters)
     def to_h
       {
         'schema'                 => SCHEMA_VERSION,
@@ -153,17 +175,213 @@ module Ruby4Lich5
       }
     end
 
+    # Reconstructs a real lock from {#to_h}'s own output shape -- the
+    # actual "resolve once" cutover (docs/DECISIONS.md's F2 design) needs
+    # this to exist at all: a lock resolved by one workflow step has to
+    # survive being written to disk and read back by every later step
+    # (native prep, runtime staging, revalidation) without any of them
+    # touching {ClosureResolver}/{RubygemsClient} again.
+    #
+    # **Real gap, found in review, before this had a real caller**: an
+    # earlier version of {#to_h}'s own closure serialization only kept
+    # +classification.state.to_s+, dropping +reason+/+platform_asset+/
+    # +msys2_packages+/+gem_name+/+gem_version+ entirely -- harmless for
+    # its original purpose (a debug JSON dump nothing ever read back), but
+    # actively broken for a real round-trip: reconstructing a
+    # +:native_pass_through+ {Classification} with no +platform_asset}+
+    # would raise +ArgumentError+ immediately from {Classification}'s own
+    # constructor, which requires that field present for exactly that
+    # state. Fixed here and in {#serialize_closure_entry} together, before
+    # any real caller could hit it -- {#to_h}'s +'classification'+ value is
+    # now the full field set, not just the state string.
+    #
+    # @param data [Hash] must match {#to_h}'s own shape (String keys
+    #   throughout, matching how +JSON.parse+ always produces it)
+    # @return [ResolutionLock]
+    # @raise [ValidationError] if +data+ (or any nested document/object
+    #   shape within it) is missing a required key, isn't the type this
+    #   schema requires, has the wrong schema version, or otherwise fails
+    #   {#initialize}'s own validation once reconstructed. Real gaps, found
+    #   in audit 2026-07-13: +.from_h(nil)+ (or any other non-Hash
+    #   top-level document) previously leaked a raw +NoMethodError+ from
+    #   the very first +.fetch+ call, since neither +KeyError+ nor
+    #   +TypeError+ covers "the receiver doesn't even have +#fetch+."
+    #   Every document/object level this method or {.deserialize_closure_entry}
+    #   touches is now shape-checked (+is_a?+) before anything calls
+    #   +#fetch+ on it, rather than trusting exception classes alone to
+    #   catch every possible malformed shape.
+    def self.from_h(data)
+      unless data.is_a?(Hash)
+        raise ValidationError, "resolution lock data must be an object, got #{data.class}: #{data.inspect}"
+      end
+      reject_unknown_keys!(data, ALLOWED_TOP_LEVEL_KEYS, 'resolution lock data')
+
+      schema = data.fetch('schema')
+      unless schema == SCHEMA_VERSION
+        raise ValidationError, "unrecognized resolution lock schema version: #{schema.inspect}"
+      end
+
+      registry = data.fetch('registry')
+      unless registry.is_a?(Hash)
+        raise ValidationError, "resolution lock 'registry' must be an object, got #{registry.class}: #{registry.inspect}"
+      end
+      reject_unknown_keys!(registry, ALLOWED_REGISTRY_KEYS, "resolution lock's registry")
+
+      closure_data = data.fetch('closure')
+      unless closure_data.is_a?(Array)
+        raise ValidationError, "resolution lock 'closure' must be an array, got #{closure_data.class}: #{closure_data.inspect}"
+      end
+
+      new(
+        ruby_installer_version: data.fetch('ruby_installer_version'),
+        platform: data.fetch('platform'),
+        requested_roots: data.fetch('requested_roots'),
+        closure: closure_data.map { |entry| deserialize_closure_entry(entry) },
+        registry_commit_sha: registry.fetch('commit_sha'),
+        registry_content_digest: registry.fetch('content_digest')
+      )
+    rescue KeyError, TypeError, ArgumentError => e
+      # ArgumentError alongside KeyError/TypeError -- real gap, found in
+      # audit 2026-07-13: a malformed requirement string (Gem::Requirement::
+      # BadRequirementError, a subclass of ArgumentError) or a
+      # Classification field violation (Classification#initialize's own
+      # ArgumentError -- e.g. a native_pass_through entry missing
+      # platform_asset) both previously leaked past this boundary
+      # unrescued. Every exception this whole reconstruction can raise for
+      # malformed *input* is one of these three classes; a real
+      # programming bug elsewhere would raise something else entirely, so
+      # this stays a deliberate, narrow list, not a bare +rescue+.
+      raise ValidationError, "malformed resolution lock data: #{e.message}"
+    end
+
+    # @return [Hash] a {#initialize}-shaped closure entry
+    # @raise [ValidationError] on any missing/malformed field, or a
+    #   real gap found in audit 2026-07-13: a classification whose own
+    #   recorded +gem_name+/+gem_version+ silently disagreed with the
+    #   enclosing closure entry's own +name+/+version+ -- reproduced live
+    #   (a hand-edited lock JSON with a classification naming a different
+    #   gem than its own entry), constructing a {Classification} that
+    #   reports a name/version different from the entry it's attached to,
+    #   undetected. Every other exception this method raises (+KeyError+,
+    #   +TypeError+, +ArgumentError+ from {Classification}/+Gem::Requirement+)
+    #   is deliberately not rescued here; {.from_h} is this method's one
+    #   real caller and wraps every exception from this whole
+    #   reconstruction into a single +ValidationError+ boundary
+    def self.deserialize_closure_entry(entry)
+      unless entry.is_a?(Hash)
+        raise ValidationError, "closure member must be an object, got #{entry.class}: #{entry.inspect}"
+      end
+      reject_unknown_keys!(entry, ALLOWED_CLOSURE_ENTRY_KEYS, 'closure member')
+
+      name = entry.fetch('name')
+      version = entry.fetch('version')
+
+      runtime_dependencies_data = entry.fetch('runtime_dependencies')
+      unless runtime_dependencies_data.is_a?(Array)
+        raise ValidationError, "closure member #{name.inspect}'s runtime_dependencies must be an array, " \
+                                "got #{runtime_dependencies_data.class}: #{runtime_dependencies_data.inspect}"
+      end
+
+      classification_data = entry.fetch('classification')
+      unless classification_data.is_a?(Hash)
+        raise ValidationError, "closure member #{name.inspect}'s classification must be an object, " \
+                                "got #{classification_data.class}: #{classification_data.inspect}"
+      end
+      reject_unknown_keys!(classification_data, ALLOWED_CLASSIFICATION_KEYS, "closure member #{name.inspect}'s classification")
+
+      gem_name = classification_data.fetch('gem_name')
+      gem_version = classification_data.fetch('gem_version')
+      unless gem_name == name && gem_version == version
+        raise ValidationError, "closure member #{name.inspect}'s classification identity " \
+                                "(#{gem_name.inspect} #{gem_version.inspect}) does not match its own enclosing " \
+                                "entry (#{name.inspect} #{version.inspect})"
+      end
+
+      # Validated as a String before .to_sym -- real gap, found in review
+      # 2026-07-13: JSON null, a number, or an object/array all respond to
+      # neither KeyError nor TypeError/ArgumentError when .to_sym is called
+      # directly on them -- they raise a bare NoMethodError (no such
+      # method), past this whole boundary's promised ValidationError
+      # contract entirely. Confirmed live for all three shapes before
+      # fixing.
+      state_value = classification_data.fetch('state')
+      unless state_value.is_a?(String)
+        raise ValidationError, "closure member #{name.inspect}'s classification state must be a string, " \
+                                "got #{state_value.class}: #{state_value.inspect}"
+      end
+
+      {
+        name: name,
+        version: version,
+        runtime_dependencies: runtime_dependencies_data.map { |dep| deserialize_dependency(name, dep) },
+        classification: Classification.new(
+          state: state_value.to_sym,
+          gem_name: gem_name,
+          gem_version: gem_version,
+          reason: classification_data.fetch('reason'),
+          platform_asset: classification_data.fetch('platform_asset'),
+          msys2_packages: classification_data.fetch('msys2_packages')
+        )
+      }
+    end
+    private_class_method :deserialize_closure_entry
+
+    # @param member_name [String] the enclosing closure entry's own name,
+    #   for a clear error message only
+    # @param dep [Object] one raw +runtime_dependencies+ array element
+    # @return [Hash] +{name:, requirement:}+
+    # @raise [ValidationError] if +dep+ isn't an object at all
+    def self.deserialize_dependency(member_name, dep)
+      unless dep.is_a?(Hash)
+        raise ValidationError, "closure member #{member_name.inspect} has a malformed dependency entry: #{dep.inspect}"
+      end
+      reject_unknown_keys!(dep, ALLOWED_DEPENDENCY_KEYS, "closure member #{member_name.inspect}'s dependency entry")
+
+      { name: dep.fetch('name'), requirement: Gem::Requirement.new(dep.fetch('requirement')) }
+    end
+    private_class_method :deserialize_dependency
+
+    # @param hash [Hash]
+    # @param allowed [Array<String>]
+    # @param label [String]
+    # @raise [ValidationError]
+    def self.reject_unknown_keys!(hash, allowed, label)
+      unknown = hash.keys - allowed
+      return if unknown.empty?
+
+      raise ValidationError, "#{label} has unrecognized field(s): #{unknown.sort.inspect}"
+    end
+    private_class_method :reject_unknown_keys!
+
     private
 
     # @return [Hash]
     def serialize_closure_entry(entry)
+      classification = entry.fetch(:classification)
       {
         'name'                 => entry.fetch(:name),
         'version'              => entry.fetch(:version),
         'runtime_dependencies' => entry.fetch(:runtime_dependencies).map do |dep|
-          { 'name' => dep.fetch(:name), 'requirement' => dep.fetch(:requirement).to_s }
+          # #as_list (an Array of individual constraint strings, e.g.
+          # [">= 1.1.1", "< 4"]), not #to_s -- real gap, found live while
+          # smoke-testing #from_h against a real resolved lock, before
+          # this had a real caller: #to_s joins multiple constraints into
+          # one comma-separated String (">= 1.1.1, < 4"), which
+          # Gem::Requirement.new can't parse back -- it raises
+          # BadRequirementError, treating the whole joined string as one
+          # illformed constraint. #as_list is the same shape
+          # {#deep_freeze}'s own Gem::Requirement rebuild already uses
+          # (Gem::Requirement.new(obj.as_list)) for exactly this reason.
+          { 'name' => dep.fetch(:name), 'requirement' => dep.fetch(:requirement).as_list }
         end,
-        'classification'       => entry.fetch(:classification).state.to_s
+        'classification'       => {
+          'state'          => classification.state.to_s,
+          'gem_name'       => classification.gem_name,
+          'gem_version'    => classification.gem_version,
+          'reason'         => classification.reason,
+          'platform_asset' => classification.platform_asset,
+          'msys2_packages' => classification.msys2_packages
+        }
       }
     end
 
@@ -415,6 +633,24 @@ module Ruby4Lich5
           pair.freeze
         end
         rebuilt.requirements.freeze
+
+        # Real gap, found in review, round four -- before this had a real
+        # caller: Gem::Requirement#== (and #eql?) lazily memoize
+        # @_sorted_requirements/@_tilde_requirements on first call
+        # (+@_sorted_requirements ||= requirements.sort_by(&:to_s)+,
+        # confirmed directly against the real installed rubygems source).
+        # Freezing +rebuilt+ before that first call ever happens means the
+        # *first* +==+ against this frozen object raises FrozenError
+        # trying to write that memo ivar -- confirmed live. A self-
+        # comparison here forces the memoization to happen while the
+        # object is still mutable, so every real +==+/+eql?+ call
+        # afterward hits the already-populated cache instead of trying to
+        # write to a frozen object. Deliberately the public +==+/+eql?+
+        # rather than reaching into the private +_sorted_requirements+
+        # method directly -- not this class's business to depend on
+        # RubyGems' own internal method name surviving a future version.
+        rebuilt == rebuilt # rubocop:disable Lint/BinaryOperatorWithIdenticalOperands, Lint/Void
+        rebuilt.eql?(rebuilt)
         rebuilt.freeze
       when Classification
         # Real gap, found in review, round three: only msys2_packages went

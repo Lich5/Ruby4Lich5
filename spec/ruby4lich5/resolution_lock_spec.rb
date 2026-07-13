@@ -71,7 +71,17 @@ RSpec.describe Ruby4Lich5::ResolutionLock do
   end
 
   describe '#to_h' do
-    it 'serializes every field into the locked schema shape' do
+    # closure_entry's own classification default (spec/support/closure_fixtures.rb):
+    # gem_name/gem_version match the entry's own name/version (real
+    # invariant, enforced by ResolutionLock.deserialize_closure_entry as of
+    # 2026-07-13's audit fixes), reason: 'test', no platform_asset/
+    # msys2_packages for :pure.
+    def pure_classification_hash(name, version)
+      { 'state' => 'pure', 'gem_name' => name, 'gem_version' => version, 'reason' => 'test',
+        'platform_asset' => nil, 'msys2_packages' => nil }
+    end
+
+    it 'serializes every field into the locked schema shape, the full classification, not just state' do
       result = build.to_h
 
       expect(result).to eq(
@@ -81,10 +91,10 @@ RSpec.describe Ruby4Lich5::ResolutionLock do
           'platform'               => 'x64-mingw-ucrt',
           'requested_roots'        => { 'root-gem' => '1.0.0' },
           'closure'                => [
-            { 'name' => 'dep-gem', 'version' => '2.7.0', 'runtime_dependencies' => [], 'classification' => 'pure' },
+            { 'name' => 'dep-gem', 'version' => '2.7.0', 'runtime_dependencies' => [], 'classification' => pure_classification_hash('dep-gem', '2.7.0') },
             { 'name' => 'root-gem', 'version' => '1.0.0',
-              'runtime_dependencies' => [{ 'name' => 'dep-gem', 'requirement' => '>= 2.6' }],
-              'classification' => 'pure' }
+              'runtime_dependencies' => [{ 'name' => 'dep-gem', 'requirement' => ['>= 2.6'] }],
+              'classification' => pure_classification_hash('root-gem', '1.0.0') }
           ],
           'registry'               => { 'commit_sha' => valid_commit_sha, 'content_digest' => valid_digest }
         }
@@ -98,7 +108,7 @@ RSpec.describe Ruby4Lich5::ResolutionLock do
       expect(result['closure'].map { |e| e['name'] }).to eq(%w[root-gem dep-gem])
     end
 
-    it 'round-trips a real Gem::Requirement into its String form, not an inspected object' do
+    it 'round-trips a real Gem::Requirement as its #as_list form, not an inspected object' do
       closure = [
         closure_entry('dep-gem', '2.7.0'),
         closure_entry('root-gem', '1.0.0', deps: [['dep-gem', '~> 2.6']])
@@ -106,15 +116,233 @@ RSpec.describe Ruby4Lich5::ResolutionLock do
 
       result = build(closure: closure).to_h
 
-      expect(result['closure'].last['runtime_dependencies']).to eq([{ 'name' => 'dep-gem', 'requirement' => '~> 2.6' }])
+      expect(result['closure'].last['runtime_dependencies']).to eq([{ 'name' => 'dep-gem', 'requirement' => ['~> 2.6'] }])
     end
 
-    it 'serializes a native_self_contained classification with its own state string' do
+    # Real gap, found live while smoke-testing #from_h against a real
+    # resolved lock, before this had a real caller: #to_s joins multiple
+    # constraints into one comma-separated String (">= 1.1.1, < 4"), which
+    # Gem::Requirement.new can't parse back -- BadRequirementError, the
+    # whole joined string treated as one illformed constraint. #as_list
+    # (an Array of individual constraint strings) is what actually
+    # survives the round trip; a single-constraint requirement wouldn't
+    # have caught this at all, so this test uses a real multi-constraint
+    # one specifically.
+    it 'round-trips a real multi-constraint Gem::Requirement -- the exact shape #to_s could not have survived' do
+      closure = [
+        closure_entry('dep-gem', '2.7.0'),
+        closure_entry('root-gem', '1.0.0', deps: [['dep-gem', ['>= 1.1.1', '< 4']]])
+      ]
+
+      result = build(closure: closure).to_h
+      reconstructed = described_class.from_h(result)
+
+      expect(result['closure'].last['runtime_dependencies']).to eq([{ 'name' => 'dep-gem', 'requirement' => ['>= 1.1.1', '< 4'] }])
+      requirement = reconstructed.closure.last.fetch(:runtime_dependencies).first.fetch(:requirement)
+      expect(requirement).to eq(Gem::Requirement.new('>= 1.1.1', '< 4'))
+    end
+
+    it 'serializes a native_self_contained classification with its full field set, not just state' do
       closure = [closure_entry('root-gem', '1.0.0', state: :native_self_contained, msys2_packages: ['mingw-w64-ucrt-x86_64-example'])]
 
       result = build(closure: closure, requested_roots: { 'root-gem' => '1.0.0' }).to_h
 
-      expect(result['closure'].first['classification']).to eq('native_self_contained')
+      expect(result['closure'].first['classification']).to eq(
+        { 'state' => 'native_self_contained', 'gem_name' => 'root-gem', 'gem_version' => '1.0.0', 'reason' => 'test',
+          'platform_asset' => nil, 'msys2_packages' => ['mingw-w64-ucrt-x86_64-example'] }
+      )
+    end
+
+    # Real gap, found in review, before this had a real caller: an earlier
+    # version only serialized classification.state.to_s -- lossless for a
+    # debug JSON dump nothing ever read back, but reconstructing a real
+    # Classification from that alone would raise ArgumentError for any
+    # state requiring platform_asset/msys2_packages (Classification's own
+    # constructor enforces their presence per state). #from_h is the
+    # actual "resolve once" cutover's whole reason to exist -- proving a
+    # full round trip here, not just that #to_h alone looks right.
+    describe '#from_h -- round trip' do
+      it 'reconstructs an equivalent lock whose own #to_h matches the original exactly' do
+        original = build(closure: valid_closure, requested_roots: { 'root-gem' => '1.0.0' })
+
+        reconstructed = described_class.from_h(original.to_h)
+
+        expect(reconstructed.to_h).to eq(original.to_h)
+      end
+
+      it 'reconstructs a real Gem::Requirement, not a String, for every runtime_dependencies edge' do
+        closure = [
+          closure_entry('dep-gem', '2.7.0'),
+          closure_entry('root-gem', '1.0.0', deps: [['dep-gem', '~> 2.6']])
+        ]
+        original = build(closure: closure, requested_roots: { 'root-gem' => '1.0.0' })
+
+        reconstructed = described_class.from_h(original.to_h)
+
+        requirement = reconstructed.closure.last.fetch(:runtime_dependencies).first.fetch(:requirement)
+        expect(requirement).to be_a(Gem::Requirement)
+        expect(requirement).to eq(Gem::Requirement.new('~> 2.6'))
+      end
+
+      it 'reconstructs a real Classification, not a String, for every closure entry' do
+        closure = [closure_entry('root-gem', '1.0.0', state: :native_self_contained, msys2_packages: ['mingw-w64-ucrt-x86_64-example'])]
+        original = build(closure: closure, requested_roots: { 'root-gem' => '1.0.0' })
+
+        reconstructed = described_class.from_h(original.to_h)
+
+        classification = reconstructed.closure.first.fetch(:classification)
+        expect(classification).to be_a(Ruby4Lich5::Classification)
+        expect(classification.self_contained?).to be(true)
+        expect(classification.msys2_packages).to eq(['mingw-w64-ucrt-x86_64-example'])
+      end
+
+      it 'reconstructs a native_pass_through classification without raising -- the exact shape the old lossy serialization would have broken' do
+        closure = [
+          closure_entry(
+            'root-gem', '1.0.0', state: :native_pass_through, platform_asset: 'root-gem-1.0.0-x64-mingw-ucrt.gem'
+          )
+        ]
+        original = build(closure: closure, requested_roots: { 'root-gem' => '1.0.0' })
+
+        reconstructed = described_class.from_h(original.to_h)
+
+        expect(reconstructed.closure.first.fetch(:classification).platform_asset).to eq('root-gem-1.0.0-x64-mingw-ucrt.gem')
+      end
+
+      it 'raises ValidationError for an unrecognized schema version' do
+        data = build.to_h.merge('schema' => 99)
+
+        expect { described_class.from_h(data) }
+          .to raise_error(described_class::ValidationError, /unrecognized resolution lock schema version: 99/)
+      end
+
+      it 'raises ValidationError, not a raw KeyError, for data missing a required top-level key' do
+        data = build.to_h.reject { |key, _| key == 'platform' }
+
+        expect { described_class.from_h(data) }
+          .to raise_error(described_class::ValidationError, /malformed resolution lock data/)
+      end
+
+      it 'raises ValidationError, not a raw KeyError, for a closure entry missing a classification field' do
+        data = build.to_h
+        data['closure'].first['classification'].delete('reason')
+
+        expect { described_class.from_h(data) }
+          .to raise_error(described_class::ValidationError, /malformed resolution lock data/)
+      end
+
+      context 'strict deserialization boundary, found in audit 2026-07-13' do
+        it 'raises ValidationError, not a raw NoMethodError, for nil top-level data' do
+          expect { described_class.from_h(nil) }
+            .to raise_error(described_class::ValidationError, /resolution lock data must be an object, got NilClass/)
+        end
+
+        it 'raises ValidationError, not a raw NoMethodError, for a non-Hash top-level document (e.g. an Array)' do
+          expect { described_class.from_h([1, 2, 3]) }
+            .to raise_error(described_class::ValidationError, /resolution lock data must be an object, got Array/)
+        end
+
+        it 'raises ValidationError for a non-Hash registry' do
+          data = build.to_h.merge('registry' => 'not-an-object')
+
+          expect { described_class.from_h(data) }
+            .to raise_error(described_class::ValidationError, /resolution lock 'registry' must be an object, got String/)
+        end
+
+        it 'raises ValidationError for a non-Array closure' do
+          data = build.to_h.merge('closure' => 'not-an-array')
+
+          expect { described_class.from_h(data) }
+            .to raise_error(described_class::ValidationError, /resolution lock 'closure' must be an array, got String/)
+        end
+
+        it 'raises ValidationError for a non-Hash closure member' do
+          data = build.to_h
+          data['closure'][0] = nil
+
+          expect { described_class.from_h(data) }
+            .to raise_error(described_class::ValidationError, /closure member must be an object, got NilClass/)
+        end
+
+        it 'raises ValidationError for an unrecognized top-level field' do
+          data = build.to_h.merge('unexpected_field' => 'surprise')
+
+          expect { described_class.from_h(data) }
+            .to raise_error(described_class::ValidationError, /resolution lock data has unrecognized field\(s\): \["unexpected_field"\]/)
+        end
+
+        it 'raises ValidationError for an unrecognized field inside a closure member' do
+          data = build.to_h
+          data['closure'].first['unexpected_field'] = 'surprise'
+
+          expect { described_class.from_h(data) }
+            .to raise_error(described_class::ValidationError, /closure member has unrecognized field\(s\): \["unexpected_field"\]/)
+        end
+
+        it "raises ValidationError when a classification's gem_name/gem_version disagree with its own enclosing entry" do
+          # Reproduced live: a hand-edited (or otherwise corrupted) lock
+          # document can carry a classification whose own recorded
+          # identity names a completely different gem than the closure
+          # entry it's attached to -- nothing before this fix ever
+          # cross-checked the two agreed.
+          data = build.to_h
+          data['closure'].first['classification']['gem_name'] = 'different'
+
+          expect { described_class.from_h(data) }
+            .to raise_error(described_class::ValidationError, /classification identity \("different" "2\.7\.0"\) does not match its own enclosing entry \("dep-gem" "2\.7\.0"\)/)
+        end
+
+        it 'raises ValidationError, not a raw Gem::Requirement::BadRequirementError, for a malformed dependency requirement' do
+          data = build.to_h
+          data['closure'].last['runtime_dependencies'].first['requirement'] = ['not a real requirement']
+
+          expect { described_class.from_h(data) }
+            .to raise_error(described_class::ValidationError, /malformed resolution lock data/)
+        end
+
+        it 'raises ValidationError, not a raw ArgumentError, for a classification with an invalid state field combination' do
+          # native_pass_through requires platform_asset present -- a
+          # hand-edited lock naming that state with no asset previously
+          # let Classification#initialize's own ArgumentError leak straight
+          # through .from_h unrescued.
+          data = build.to_h
+          data['closure'].first['classification']['state'] = 'native_pass_through'
+
+          expect { described_class.from_h(data) }
+            .to raise_error(described_class::ValidationError, /malformed resolution lock data/)
+        end
+
+        # Real gap, found in review 2026-07-13: classification_data.fetch('state').to_sym
+        # was called directly on whatever JSON produced -- nil, a number,
+        # and a Hash/Array all lack #to_sym entirely, so each raised a bare
+        # NoMethodError past this whole boundary's promised ValidationError
+        # contract (not caught by .from_h's own `rescue KeyError, TypeError,
+        # ArgumentError`, since NoMethodError is none of those). Confirmed
+        # live for all three shapes before fixing.
+        it 'raises ValidationError, not a raw NoMethodError, for a null classification state' do
+          data = build.to_h
+          data['closure'].first['classification']['state'] = nil
+
+          expect { described_class.from_h(data) }
+            .to raise_error(described_class::ValidationError, /classification state must be a string/)
+        end
+
+        it 'raises ValidationError, not a raw NoMethodError, for a numeric classification state' do
+          data = build.to_h
+          data['closure'].first['classification']['state'] = 42
+
+          expect { described_class.from_h(data) }
+            .to raise_error(described_class::ValidationError, /classification state must be a string/)
+        end
+
+        it 'raises ValidationError, not a raw NoMethodError, for an object-shaped classification state' do
+          data = build.to_h
+          data['closure'].first['classification']['state'] = { 'nested' => 'value' }
+
+          expect { described_class.from_h(data) }
+            .to raise_error(described_class::ValidationError, /classification state must be a string/)
+        end
+      end
     end
   end
 

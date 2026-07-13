@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require 'ruby4lich5/gem_manifest_generator'
+require 'ruby4lich5/resolution_lock'
+require 'ruby4lich5/classification'
 require 'tmpdir'
 require 'fileutils'
 require 'json'
@@ -9,18 +11,19 @@ require 'open3'
 require 'rubygems/package'
 
 # Real subprocess integration test for bin/generate_gem_manifest.rb -- proves
-# the CLI's own ARGV-parsing/wiring (StagedGemSpecFinder,
-# NativeGemDigestFetcher, JSON output, exit codes) works end to end as an
-# actual external process, not just via internal Ruby doubles the way
-# gem_manifest_generator_spec.rb already covers the generator's own logic.
+# the CLI's own ARGV-parsing/wiring (ResolutionLock deserialization,
+# StagedGemSpecFinder, NativeGemDigestFetcher, JSON output, exit codes)
+# works end to end as an actual external process, not just via internal Ruby
+# doubles the way gem_manifest_generator_spec.rb already covers the
+# generator's own logic.
 #
-# Deliberately native-gems-only, no pure gems: a pure gem's digest check
-# calls out to the real RubyGems.org API (RubygemsClient's real HTTP
-# default), which this suite otherwise never does (every other pure-gem
-# digest spec injects a stub). Keeping this one network-free means it stays
-# fast and doesn't make CI depend on RubyGems.org being reachable -- the
-# pure-gem cross-check path itself is already locked at the unit level in
-# gem_manifest_generator_spec.rb.
+# Deliberately native_self_contained-only, no pure/pass-through gems: those
+# digest checks call out to the real RubyGems.org API (RubygemsClient's real
+# HTTP default), which this suite otherwise never does (every other
+# pure/pass-through digest spec injects a stub). Keeping this one
+# network-free means it stays fast and doesn't make CI depend on
+# RubyGems.org being reachable -- the pure/pass-through cross-check paths
+# are already locked at the unit level in gem_manifest_generator_spec.rb.
 RSpec.describe 'bin/generate_gem_manifest.rb (CLI integration)' do
   def build_real_gem(dir, name, version)
     spec = Gem::Specification.new(name, version) { |s| s.summary = 'fixture'; s.authors = ['fixture']; s.files = [] }
@@ -57,10 +60,48 @@ RSpec.describe 'bin/generate_gem_manifest.rb (CLI integration)' do
     FileUtils.chmod('+x', path)
   end
 
+  # @return [Hash] a {ResolutionLock#initialize}-shaped closure entry,
+  #   classified native_self_contained (the only state that needs no real
+  #   network digest check, matching this whole spec's network-free
+  #   constraint)
+  def self_contained_entry(name, version)
+    { name: name, version: version, runtime_dependencies: [],
+      classification: Ruby4Lich5::Classification.new(
+        state: :native_self_contained, gem_name: name, gem_version: version,
+        reason: 'fixture', platform_asset: nil, msys2_packages: ['fixture-pkg']
+      ) }
+  end
+
+  # @return [Hash] a {ResolutionLock#initialize}-shaped closure entry,
+  #   classified ruby_bundled -- never staged, no artifact
+  def bundled_entry(name, version)
+    { name: name, version: version, runtime_dependencies: [],
+      classification: Ruby4Lich5::Classification.new(
+        state: :ruby_bundled, gem_name: name, gem_version: version,
+        reason: 'fixture', platform_asset: nil, msys2_packages: nil
+      ) }
+  end
+
+  # Writes a real, valid ResolutionLock's own #to_h JSON to +path+ -- the
+  # CLI's only source of root names, ruby_abi, platform, and delivery
+  # states (2026-07-13 audit finding: the old CSV-args boundary let a
+  # dispatch string disagree with what was actually resolved/staged; a real
+  # lock structurally can't).
+  def write_lock_json(path, requested_root_names, version: '1.0.0', platform: 'x64-mingw-ucrt')
+    requested_roots = requested_root_names.to_h { |name| [name, version] }
+    closure = requested_root_names.map { |name| self_contained_entry(name, version) }
+    lock = Ruby4Lich5::ResolutionLock.new(
+      ruby_installer_version: '4.0.5-1', platform: platform, requested_roots: requested_roots, closure: closure,
+      registry_commit_sha: 'a' * 40, registry_content_digest: "sha256:#{'b' * 64}"
+    )
+    File.write(path, JSON.pretty_generate(lock.to_h))
+  end
+
   around do |example|
     Dir.mktmpdir('generate-gem-manifest-cli-spec-') do |root|
       @pkg_dir = File.join(root, 'pkg')
       @bin_dir = File.join(root, 'bin')
+      @lock_path = File.join(root, 'resolution-lock.json')
       @out_path = File.join(root, 'manifest.json')
       FileUtils.mkdir_p(@pkg_dir)
       FileUtils.mkdir_p(@bin_dir)
@@ -68,18 +109,21 @@ RSpec.describe 'bin/generate_gem_manifest.rb (CLI integration)' do
     end
   end
 
-  it 'generates a real manifest from real staged .gem files via a real subprocess' do
-    all_native = Ruby4Lich5::GemManifestGenerator::GTK3_STACK + %w[sqlite3]
-    versions = all_native.to_h { |name| [name, '1.0.0'] }
-    versions.each { |name, version| build_real_gem(@pkg_dir, name, version) }
-    write_fake_gh(@bin_dir, @pkg_dir, versions)
-
+  def run_cli(args)
     cli_path = File.expand_path('../../bin/generate_gem_manifest.rb', __dir__)
-    env = { 'PATH' => "#{@bin_dir}:#{ENV.fetch('PATH', nil)}" }
-    args = ['sqlite3', '', '4.0', 'x64-mingw-ucrt', 'Lich5/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
-            'R4L5-gem-bundle-x64-mingw-ucrt.zip', "sha256:#{'c' * 64}", @pkg_dir, @out_path]
+    env = { 'PATH' => "#{@bin_dir}#{File::PATH_SEPARATOR}#{ENV.fetch('PATH', nil)}" }
+    Open3.capture2e(env, 'ruby', cli_path, *args)
+  end
 
-    stdout_and_err, status = Open3.capture2e(env, 'ruby', cli_path, *args)
+  it 'generates a real manifest from a real lock and real staged .gem files via a real subprocess' do
+    all_native = Ruby4Lich5::GemManifestGenerator::GTK3_STACK + %w[sqlite3]
+    all_native.each { |name| build_real_gem(@pkg_dir, name, '1.0.0') }
+    write_fake_gh(@bin_dir, @pkg_dir, all_native.to_h { |name| [name, '1.0.0'] })
+    write_lock_json(@lock_path, all_native)
+
+    args = [@lock_path, 'Lich5/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
+            'R4L5-gem-bundle-x64-mingw-ucrt.zip', "sha256:#{'c' * 64}", @pkg_dir, @out_path]
+    stdout_and_err, status = run_cli(args)
 
     expect(status).to be_success, "CLI failed: #{stdout_and_err}"
     expect(File.exist?(@out_path)).to be(true)
@@ -102,45 +146,82 @@ RSpec.describe 'bin/generate_gem_manifest.rb (CLI integration)' do
     )
   end
 
-  it 'tolerates a GTK3_STACK member leaking into pure_names_csv, real workflow scenario' do
-    # The actual real-world gap (review 2026-07-11): the workflow's own
-    # PowerShell side has no knowledge of GTK3_STACK, so the real
-    # runtime-gems default input (which starts with the bare word "gtk3")
-    # lands "gtk3" in pure_names_csv too, alongside native_names_csv already
-    # carrying it via GTK3_STACK. Reproduced here with the exact real
-    # leaked value, no native_names_csv needed at all (GTK3_STACK alone
-    # populates it) -- proves the fix (subtracting native_names from
-    # pure_names) rather than relying on the two independent safety nets
-    # that happened to already absorb it.
+  it "derives the role map from the lock's own classifications, not any dispatch-string shape" do
+    # Regression, 2026-07-13 audit finding: the old boundary threaded two
+    # independently-derived CSV name lists through the CLI, which could
+    # disagree with each other or with the workflow's own dispatch
+    # defaults. Proves the new boundary has exactly one source -- swapping
+    # the lock's own recorded delivery state for a name (never any CLI
+    # argument) is what changes this unit's shape, since a lock built with
+    # no classification other than native_self_contained cannot express a
+    # different role at all; the assertion that matters is that units are
+    # grouped and typed purely from #{@lock_path}'s own content.
     all_native = Ruby4Lich5::GemManifestGenerator::GTK3_STACK
-    versions = all_native.to_h { |name| [name, '1.0.0'] }
-    versions.each { |name, version| build_real_gem(@pkg_dir, name, version) }
-    write_fake_gh(@bin_dir, @pkg_dir, versions)
+    all_native.each { |name| build_real_gem(@pkg_dir, name, '1.0.0') }
+    write_fake_gh(@bin_dir, @pkg_dir, all_native.to_h { |name| [name, '1.0.0'] })
+    write_lock_json(@lock_path, all_native)
 
-    cli_path = File.expand_path('../../bin/generate_gem_manifest.rb', __dir__)
-    env = { 'PATH' => "#{@bin_dir}:#{ENV.fetch('PATH', nil)}" }
-    args = ['', 'gtk3', '4.0', 'x64-mingw-ucrt', 'Lich5/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
+    args = [@lock_path, 'Lich5/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
             'R4L5-gem-bundle-x64-mingw-ucrt.zip', "sha256:#{'c' * 64}", @pkg_dir, @out_path]
-
-    stdout_and_err, status = Open3.capture2e(env, 'ruby', cli_path, *args)
+    stdout_and_err, status = run_cli(args)
 
     expect(status).to be_success, "CLI failed: #{stdout_and_err}"
     manifest = JSON.parse(File.read(@out_path))
     unit_ids = manifest['targets'].first['units'].map { |u| u['id'] }
 
-    expect(unit_ids).to eq(['gtk3-runtime']) # exactly one unit, no separate "gtk3" unit
+    expect(unit_ids).to eq(['gtk3-runtime']) # exactly one unit, driven by the lock's own requested_roots
   end
 
-  it 'exits nonzero and writes nothing when a declared native gem was never staged' do
+  it 'exits nonzero and writes nothing when a declared root was never staged' do
     write_fake_gh(@bin_dir, @pkg_dir, {})
-    cli_path = File.expand_path('../../bin/generate_gem_manifest.rb', __dir__)
-    env = { 'PATH' => "#{@bin_dir}:#{ENV.fetch('PATH', nil)}" }
-    args = ['sqlite3', '', '4.0', 'x64-mingw-ucrt', 'Lich5/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
-            'R4L5-gem-bundle-x64-mingw-ucrt.zip', "sha256:#{'c' * 64}", @pkg_dir, @out_path]
+    write_lock_json(@lock_path, ['sqlite3']) # no gemspec ever built for sqlite3 in @pkg_dir
 
-    _stdout_and_err, status = Open3.capture2e(env, 'ruby', cli_path, *args)
+    args = [@lock_path, 'Lich5/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
+            'R4L5-gem-bundle-x64-mingw-ucrt.zip', "sha256:#{'c' * 64}", @pkg_dir, @out_path]
+    _stdout_and_err, status = run_cli(args)
 
     expect(status).not_to be_success
+    expect(File.exist?(@out_path)).to be(false)
+  end
+
+  it 'excludes a ruby_bundled requested root entirely, rather than crashing looking for its staged file' do
+    # CodeRabbit finding, 2026-07-13: a requested root that itself
+    # classifies ruby_bundled (never staged, no artifact) previously
+    # reached InstalledGemClosure as if it were a real staged member,
+    # which would raise MissingSpecError -- or, if that were patched
+    # without also filtering GemManifestGenerator's own root_names,
+    # GemUnitGrouper::ArgumentError instead (a root absent from the
+    # resolved closure). Neither should happen; it should simply be
+    # omitted, exactly like any other ruby_bundled closure member.
+    all_native = Ruby4Lich5::GemManifestGenerator::GTK3_STACK + %w[sqlite3]
+    all_native.each { |name| build_real_gem(@pkg_dir, name, '1.0.0') }
+    write_fake_gh(@bin_dir, @pkg_dir, all_native.to_h { |name| [name, '1.0.0'] })
+
+    requested_roots = all_native.to_h { |name| [name, '1.0.0'] }.merge('webrick' => '1.9.1')
+    closure = all_native.map { |name| self_contained_entry(name, '1.0.0') } + [bundled_entry('webrick', '1.9.1')]
+    lock = Ruby4Lich5::ResolutionLock.new(
+      ruby_installer_version: '4.0.5-1', platform: 'x64-mingw-ucrt', requested_roots: requested_roots, closure: closure,
+      registry_commit_sha: 'a' * 40, registry_content_digest: "sha256:#{'b' * 64}"
+    )
+    File.write(@lock_path, JSON.pretty_generate(lock.to_h))
+
+    args = [@lock_path, 'Lich5/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
+            'R4L5-gem-bundle-x64-mingw-ucrt.zip', "sha256:#{'c' * 64}", @pkg_dir, @out_path]
+    stdout_and_err, status = run_cli(args)
+
+    expect(status).to be_success, "CLI failed: #{stdout_and_err}"
+    unit_ids = JSON.parse(File.read(@out_path))['targets'].first['units'].map { |u| u['id'] }
+    expect(unit_ids).to contain_exactly('gtk3-runtime', 'sqlite3') # 'webrick' never gets a unit at all
+  end
+
+  it 'exits with code 2 and writes nothing when the lock file is malformed' do
+    File.write(@lock_path, 'not valid json')
+
+    args = [@lock_path, 'Lich5/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
+            'R4L5-gem-bundle-x64-mingw-ucrt.zip', "sha256:#{'c' * 64}", @pkg_dir, @out_path]
+    _stdout_and_err, status = run_cli(args)
+
+    expect(status.exitstatus).to eq(2)
     expect(File.exist?(@out_path)).to be(false)
   end
 end

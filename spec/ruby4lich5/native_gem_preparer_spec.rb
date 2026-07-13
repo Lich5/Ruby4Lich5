@@ -364,4 +364,88 @@ RSpec.describe Ruby4Lich5::NativeGemPreparer do
       end
     end
   end
+
+  # The locked-input counterpart to #prepare -- a caller holding an
+  # already-resolved plan (e.g. the GTK subset of a real ResolutionLock's
+  # own closure, translated into this shape) can normalize/patch it
+  # without BuildPlanner ever being called at all.
+  describe '#prepare_from_plan' do
+    it 'never calls BuildPlanner#plan_for -- the whole point of a locked-input mode' do
+      allow(build_planner).to receive(:plan_for)
+      plan = [{ name: 'widget', version: '1.0.0', classification: classification(:pure), runtime_dependency_names: [] }]
+
+      preparer.prepare_from_plan(plan, platform: 'x64-mingw-ucrt', source_root: @source_root)
+
+      expect(build_planner).not_to have_received(:plan_for)
+    end
+
+    context 'with a :native_self_contained entry' do
+      let(:plan) do
+        [{ name: 'widget', version: '1.0.0', classification: classification(:native_self_contained), runtime_dependency_names: [] }]
+      end
+
+      before do
+        write_gemspec('widget')
+        allow(patch_applier).to receive(:apply_all).and_return([{ patch: 'some-fix', status: :applied }])
+      end
+
+      it 'normalizes and patches exactly as #prepare would for the same entry shape' do
+        result = preparer.prepare_from_plan(plan, platform: 'x64-mingw-ucrt', source_root: @source_root)
+
+        expect(gemspec_normalizer)
+          .to have_received(:normalize).with('widget', File.join(@source_root, 'widget'), platform: 'x64-mingw-ucrt')
+        expect(patch_applier).to have_received(:apply_all).with('widget', File.join(@source_root, 'widget'))
+        expect(result.first.fetch(:patches_applied)).to eq([{ patch: 'some-fix', status: :applied }])
+      end
+    end
+
+    it 'classifies vendoring roles from the given plan, same as #prepare' do
+      plan = [{ name: 'widget', version: '1.0.0', classification: classification(:pure), runtime_dependency_names: [] }]
+      allow(vendoring_role_classifier).to receive(:classify).with(plan).and_return({ 'widget' => :vendoring_root })
+
+      result = preparer.prepare_from_plan(plan, platform: 'x64-mingw-ucrt', source_root: @source_root)
+
+      expect(result.first.fetch(:vendoring_role)).to eq(:vendoring_root)
+    end
+
+    # Real gap, found in review: #prepare gets an UnbuildableGemError check
+    # for free from BuildPlanner#plan_for itself (it raises before ever
+    # returning a plan containing one) -- but a plan built elsewhere (a
+    # lock's own closure, which #prepare_from_plan never asks
+    # BuildPlanner to re-derive) was never passed through that same check.
+    # Without this, a caller could silently normalize/patch a gem this
+    # project already knows cannot be built.
+    it 'raises UnbuildableGemError if any entry classifies as native_needs_system_lib' do
+      plan = [
+        {
+          name: 'widget', version: '1.0.0',
+          classification: Ruby4Lich5::Classification.new(
+            state: :native_needs_system_lib, gem_name: 'widget', gem_version: '1.0.0', reason: 'no known way to vendor libfoo'
+          ),
+          runtime_dependency_names: []
+        }
+      ]
+
+      expect { preparer.prepare_from_plan(plan, platform: 'x64-mingw-ucrt', source_root: @source_root) }
+        .to raise_error(Ruby4Lich5::BuildPlanner::UnbuildableGemError, /widget 1\.0\.0.*no known way to vendor libfoo/)
+    end
+
+    it 'never normalizes or patches anything when the plan is rejected for an unbuildable entry' do
+      write_gemspec('widget')
+      plan = [
+        {
+          name: 'widget', version: '1.0.0',
+          classification: Ruby4Lich5::Classification.new(
+            state: :native_needs_system_lib, gem_name: 'widget', gem_version: '1.0.0', reason: 'no known way to vendor libfoo'
+          ),
+          runtime_dependency_names: []
+        }
+      ]
+
+      expect { preparer.prepare_from_plan(plan, platform: 'x64-mingw-ucrt', source_root: @source_root) }
+        .to raise_error(Ruby4Lich5::BuildPlanner::UnbuildableGemError)
+      expect(gemspec_normalizer).not_to have_received(:normalize)
+      expect(patch_applier).not_to have_received(:apply_all)
+    end
+  end
 end
