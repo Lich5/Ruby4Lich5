@@ -598,17 +598,19 @@ jobs:
 
           # Every native_self_contained closure member outside the
           # Ruby-GNOME source checkout and cairo (both already handled
-          # specially, immediately below) -- e.g. ox/curses. Real bug,
-          # found in review 2026-07-13: NativeGemPreparer#prepare_from_plan
-          # unconditionally normalizes/patches *every* native_self_contained
-          # entry in the whole lock (not just the fixed GTK3 build list),
-          # but this step previously only ever populated source for the
-          # Ruby-GNOME stack plus cairo -- any other native_self_contained
-          # member (there was never a curated-patch-free exemption for
-          # these; NativeGemPreparer#prepare_self_contained always loads
-          # the real gemspec) had no source directory at all, raising
-          # GemspecNormalizer::NormalizationError the first time this ran
-          # against a real closure containing one.
+          # specially, immediately below) -- e.g. ox. This selector fetches
+          # every such candidate's exact locked .gem package unconditionally
+          # (never unpacked or copied into $build) -- it does not itself
+          # know or check NativeGemPreparer's own REPACK_ONLY_GEMS
+          # allowlist, so a name here is not yet a claim that it's actually
+          # safe to repack without patching. That accept/reject decision is
+          # entirely NativeGemPreparer's own (real fix, 2026-07-13; see its
+          # GTK3_STACK/REPACK_ONLY_GEMS doc comments) -- an unconfigured
+          # name fetched successfully here still fails the run later, at
+          # "Prepare native gems," via UnconfiguredNativeGemError. "Build
+          # and stage runtime gem bundle"'s own repack step is the only
+          # consumer of a name that *does* clear that gate, and it needs
+          # just the fetched .gem itself (via $env:GEM_SRC_ROOT, below).
           $otherSelfContainedNames = @(
             $lock.closure | Where-Object {
               $_.classification.state -eq 'native_self_contained' -and
@@ -687,13 +689,24 @@ jobs:
             'cairo' = $cairoGem
           }
 
-          # Fetch+unpack the exact locked version of every other
-          # native_self_contained member (ox, curses, and any future
-          # additions) the same way cairo already is above -- these are
-          # real, precompiled-extension gems that still need a real
-          # gemspec at $build/<name> for NativeGemPreparer to normalize/
-          # patch, even though they're only ever repacked (never actually
-          # recompiled) by "Build and stage runtime gem bundle" below.
+          # Fetch (never unpack, never copy into $build) the exact locked
+          # version of every other native_self_contained member the lock
+          # actually has (today: ox and curses, each individually confirmed
+          # -- see NativeGemPreparer::REPACK_ONLY_GEMS's own doc comment
+          # for the cited evidence; any name here that isn't on that
+          # allowlist still fails the run later, at "Prepare native gems,"
+          # via UnconfiguredNativeGemError -- this loop fetches
+          # unconditionally and does not itself decide who's actually
+          # configured). Narrowed
+          # from an earlier version that also unpacked+copied these into
+          # $build and registered them for gemspec normalization -- real
+          # gap, found in review 2026-07-13: once NativeGemPreparer stopped
+          # normalizing/patching anything outside the GTK3 stack, that
+          # extra work (and its own needless unpack-failure path) had no
+          # consumer left at all. "Build and stage runtime gem bundle"'s
+          # own repack step is the only later reader of a name that does
+          # clear that gate, and it needs just the fetched .gem itself, via
+          # $env:GEM_SRC_ROOT.
           foreach ($gemName in $otherSelfContainedNames) {
             $entry = $lock.closure | Where-Object { $_.name -eq $gemName } | Select-Object -First 1
             $gemVersion = $entry.version
@@ -707,21 +720,6 @@ jobs:
               Write-Error "Source download failed: $gemName $gemVersion gem could not be fetched."
               exit 1
             }
-            Push-Location $src
-            & $env:GEM_EXE unpack $gemPackage
-            $unpackExit = $LASTEXITCODE
-            Pop-Location
-            if ($unpackExit -ne 0) {
-              Write-Error "Source download failed: $gemName $gemVersion gem could not be unpacked."
-              exit $unpackExit
-            }
-            $gemRoot = Join-Path $src "$gemName-$gemVersion"
-            if (!(Test-Path $gemRoot)) {
-              Write-Error "Source download failed: $gemName source did not unpack to $gemRoot."
-              exit 1
-            }
-            Copy-Item $gemRoot (Join-Path $build $gemName) -Recurse -Force
-            $sourceGemPackages[$gemName] = $gemPackage
           }
 
           foreach ($gemName in $sourceGemPackages.Keys) {

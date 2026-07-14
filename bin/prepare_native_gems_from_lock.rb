@@ -3,19 +3,29 @@
 
 # The locked-input counterpart to bin/prepare_native_gems.rb, for F2's
 # "resolve once" cutover (docs/DECISIONS.md, extended) -- normalizes and
-# patches every native_self_contained member of an already-resolved
+# patches every native_self_contained member of the fixed Ruby-GNOME/GTK3
+# stack (NativeGemPreparer::GTK3_STACK) in an already-resolved
 # ResolutionLock (bin/resolve_bundle_lock.rb's own output), never calling
 # BuildPlanner#plan_for itself. See NativeGemPreparer#prepare_from_plan's
 # own doc comment for the full "no live re-resolve" contract.
 #
 # Deliberately operates over the lock's *whole* merged closure, not one
-# root's own subtree -- NativeGemPreparer#prepare_one already skips
-# normalize/patch for anything that isn't native_self_contained, so a
-# single pass here correctly covers every self-contained member across
-# every requested root at once (the real GTK3 stack, plus anything else
-# -- e.g. ox/curses -- that classifies the same way), rather than the old
-# design's two separate mechanisms (bin/prepare_native_gems.rb for gtk3
-# specifically, a hardcoded ox/curses repack loop elsewhere).
+# root's own subtree -- NativeGemPreparer#prepare_one skips normalize/patch
+# for anything that isn't native_self_contained, *and* for a
+# native_self_contained member outside GTK3_STACK unless it's on the
+# explicit REPACK_ONLY_GEMS allowlist (real gap, found live 2026-07-13: an
+# earlier version of this normalized/patched every native_self_contained
+# member uniformly, including ox, which raised
+# PatchGenerator::NoAnchorFound -- ox never needed this treatment at all).
+# A single pass here still correctly covers every requested root at once
+# (the real GTK3 stack, patched; ox and curses, each individually
+# confirmed on the explicit REPACK_ONLY_GEMS allowlist, passed through
+# untouched for the surrounding workflow's own repack step; anything else
+# outside both fails the run closed via UnconfiguredNativeGemError rather
+# than being silently assumed safe), rather than the old design's two
+# separate mechanisms
+# (bin/prepare_native_gems.rb for gtk3 specifically, a hardcoded ox/curses
+# repack loop elsewhere).
 #
 # Output JSON shape matches bin/prepare_native_gems.rb's own exactly
 # (NativeGemPreparer#prepare_from_plan returns the identical per-entry
@@ -39,10 +49,13 @@
 #   1 -- a bad ARGV invocation, or any unrecognized exception.
 #   2 -- deterministic, do not retry: malformed lock JSON (JSON::ParserError),
 #        ResolutionLock::ValidationError (a malformed lock file),
-#        BuildPlanner::UnbuildableGemError, GemspecNormalizer::NormalizationError,
-#        PatchApplier::PatchError, or PatchGenerator::GenerationError. All
-#        operate purely on inputs already resolved and downloaded to local
-#        disk.
+#        BuildPlanner::UnbuildableGemError, NativeGemPreparer::UnconfiguredNativeGemError
+#        (a native_self_contained closure member outside GTK3_STACK that
+#        isn't on the explicit REPACK_ONLY_GEMS allowlist either -- a real
+#        gap to fix in that allowlist, not a transient failure),
+#        GemspecNormalizer::NormalizationError, PatchApplier::PatchError, or
+#        PatchGenerator::GenerationError. All operate purely on inputs
+#        already resolved and downloaded to local disk.
 
 require 'json'
 require_relative '../lib/ruby4lich5/native_gem_preparer'
@@ -86,6 +99,7 @@ rescue JSON::ParserError, Ruby4Lich5::ResolutionLock::ValidationError => e
   warn "ERROR: #{e.class}: #{e.message}"
   exit 2
 rescue Ruby4Lich5::BuildPlanner::UnbuildableGemError,
+       Ruby4Lich5::NativeGemPreparer::UnconfiguredNativeGemError,
        Ruby4Lich5::GemspecNormalizer::NormalizationError,
        Ruby4Lich5::PatchApplier::PatchError,
        Ruby4Lich5::PatchGenerator::GenerationError => e
