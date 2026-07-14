@@ -11,26 +11,59 @@ require_relative 'safe_token'
 
 module Ruby4Lich5
   # The Ruby decision layer's actual entry point for one build request:
-  # resolve the closure, classify each gem, and -- for every gem this build
-  # must compile itself (+:native_self_contained+) -- normalize its gemspec,
+  # resolve the closure, classify each gem, and -- for every gem in the
+  # fixed Ruby-GNOME/GTK3 stack ({GTK3_STACK}) -- normalize its gemspec,
   # auto-generate the common vendor-dir + ABI-require patch if it has none
   # at all yet (item 7a, {PatchGenerator}), and apply whatever curated
   # patches exist for it, hand-written or generated.
   #
-  # Every native-self-contained gem goes through exactly this same sequence,
-  # deliberately no per-gem special-casing here: {GemspecNormalizer} always
-  # runs (the same transform for every one of them), patch generation only
-  # ever fires for a gem with zero existing patches (never touches a gem
-  # that already has any, hand-written or previously generated), and
-  # {PatchApplier} always runs last and simply returns an empty result for a
-  # gem that still has no +patches/<gem_name>/+ directory at all after that
-  # (a real, expected outcome for a gem with no compiled extension of its
-  # own -- see {#maybe_generate_patch}). Patching "falls out" for gems that
-  # don't need it rather than being conditionally skipped.
+  # **Not every +:native_self_contained+ gem** -- real gap, found live
+  # (2026-07-13, this project's first real dispatch of the "resolve once"
+  # cutover): an earlier version of this class ran the same normalize/patch
+  # sequence for *every* +:native_self_contained+ closure member, on the
+  # theory that it "falls out" harmlessly for a gem that doesn't need it.
+  # That's true for the Ruby-GNOME family itself (every member either has a
+  # curated patch, successfully auto-generates one, or hits the one
+  # documented dependency-check exemption -- see {#maybe_generate_patch}),
+  # but false in general: +ox+ is a real, independently self-contained gem
+  # with its own C extension that doesn't use Ruby-GNOME's bare
+  # +require "*.so"+ loading convention at all, so the auto-patch-
+  # generator's anchor search fails with {PatchGenerator::NoAnchorFound},
+  # unrescued (its one exemption is narrower, a different extensions
+  # shape). Confirmed live: +ox+ has never needed this treatment -- before
+  # this cutover, it was compiled and repacked entirely through the
+  # surrounding workflow's own separate mechanism, never routed through
+  # this class at all.
+  #
+  # Every {GTK3_STACK} member goes through exactly this same sequence,
+  # deliberately no per-gem special-casing among *them*:
+  # {GemspecNormalizer} always runs (the same transform for every one of
+  # them), patch generation only ever fires for a gem with zero existing
+  # patches (never touches a gem that already has any, hand-written or
+  # previously generated), and {PatchApplier} always runs last and simply
+  # returns an empty result for a gem that still has no
+  # +patches/<gem_name>/+ directory at all after that (a real, expected
+  # outcome for a gem with no compiled extension of its own). Patching
+  # "falls out" for a *stack* member that doesn't need it -- it is not
+  # attempted at all for a self-contained gem outside the stack.
   #
   # +:pure+ and +:native_pass_through+ gems need neither -- a pure gem has no
   # native extension to normalize, and a pass-through gem is fetched as an
-  # already-published platform binary, never locally compiled at all.
+  # already-published platform binary, never locally compiled at all. A
+  # +:native_self_contained+ gem outside {GTK3_STACK} needs neither either,
+  # but only if it is individually confirmed safe first -- on the explicit
+  # {REPACK_ONLY_GEMS} allowlist (today: +ox+ and +curses+, each with its
+  # own cited evidence; see that constant's own doc comment). It is then
+  # compiled via ordinary +gem install+ (real
+  # +extconf.rb+ machinery, no manual gemspec surgery) and repacked -- never
+  # patched -- entirely by the surrounding workflow's own repack step. **Not
+  # "any future addition"** -- real gap, found in review 2026-07-13, the
+  # same day as the fix above: an earlier version of this comment (and of
+  # {REPACK_ONLY_GEMS} itself, which briefly also listed +curses+ as
+  # "believed" safe) implied every non-stack self-contained gem gets this
+  # treatment. That directly contradicts the fail-closed point of the
+  # allowlist -- an unconfigured gem must raise ({UnconfiguredNativeGemError}),
+  # never silently repack.
   #
   # Deliberately stops at "resolve, classify, normalize, patch" -- same
   # boundary {BuildPlanner} already draws for its own scope. The actual
@@ -39,6 +72,76 @@ module Ruby4Lich5
   # returns its plan -- see docs/DECISIONS.md's "Ruby drives decisions,
   # PowerShell drives OS-level mechanics" split.
   class NativeGemPreparer
+    # Raised when a +:native_self_contained+ closure member is neither part
+    # of the fixed Ruby-GNOME/GTK3 stack ({GTK3_STACK}) nor on the explicit
+    # {REPACK_ONLY_GEMS} allowlist -- fails closed rather than silently
+    # assuming a gem this project has never actually checked is safe to
+    # compile-and-repack without patching. Real gap, found in review
+    # 2026-07-13: an earlier version of the ox/curses fix treated "not in
+    # GTK3_STACK" alone as proof of safety, which was verified for ox/
+    # curses specifically but not for some future self-contained gem this
+    # project hasn't yet examined -- a future addition could genuinely need
+    # the same DLL-path/ABI-require patching {GTK3_STACK} members get, and
+    # silently skipping it would be a real, silent correctness gap.
+    class UnconfiguredNativeGemError < StandardError; end
+
+    # The fixed Ruby-GNOME/GTK3 stack -- the only gems this class's own
+    # normalize/patch pipeline actually applies to. Mirrors
+    # {GemManifestGenerator::GTK3_STACK}'s own 10 names exactly, but
+    # deliberately not required from that class: the two lists are
+    # motivated by unrelated concerns (manifest unit grouping vs.
+    # build-time patch eligibility) that only coincide today by
+    # construction, not by any shared code -- requiring one from the other
+    # would wrongly couple them. Also duplicated, for its own separate
+    # reason, as the surrounding workflow's own hardcoded GTK3 build list
+    # (+ruby4-bundled-gems-suite.yml+'s "Prepare native gems" step) -- three
+    # independent copies of the same 10 names across this codebase, not
+    # one shared source; keep them in sync by hand until that's worth
+    # centralizing.
+    #
+    # @return [Array<String>]
+    GTK3_STACK = %w[glib2 gobject-introspection gio2 cairo cairo-gobject pango
+                    gdk_pixbuf2 atk gdk3 gtk3].freeze
+    private_constant :GTK3_STACK
+
+    # +:native_self_contained+ gems outside {GTK3_STACK} that are
+    # individually confirmed -- not merely assumed -- to need no
+    # normalize/patch treatment at all: no DLL-path/ABI-require issue, no
+    # curated patch, compiled via ordinary +gem install+ (real
+    # +extconf.rb+ machinery) and repacked by the surrounding workflow.
+    # Every name here must cite its own real evidence, not "believed" --
+    # real gap, found in review 2026-07-13: an earlier version of this
+    # list included +curses+ as merely believed to behave the same way as
+    # +ox+, exactly the assumption this allowlist exists to reject.
+    #
+    # - +ox+: confirmed live 2026-07-13, this project's first real dispatch
+    #   of the "resolve once" cutover (see the class doc comment) --
+    #   PatchGenerator::NoAnchorFound proved it does not fit the Ruby-GNOME
+    #   normalize/patch shape at all, and the bare-repack path (no
+    #   patching) is what it has always actually needed.
+    # - +curses+: confirmed from a real historical run, not a new dispatch
+    #   -- GitHub Actions run 29060526789 (2026-07-10, main, pre-F2, full
+    #   green: build + smoke + publish). Its build job repacked +curses+
+    #   through the exact same bare mechanism (fetch, +gem install+ via
+    #   real +extconf.rb+ against MSYS2's +pdcurses+/+ncurses+ packages,
+    #   retag) this class's own repack step still uses; its smoke job --
+    #   a genuinely clean RubyInstaller, no MSYS2, no DevKit -- ran
+    #   +require 'curses'+ successfully alongside every other runtime gem
+    #   and printed "Clean packaged Ruby4/Lich runtime smoke OK". That
+    #   proves +curses+'s compiled extension loads on a clean end-user
+    #   machine with no DLL-path patching, the exact question this
+    #   allowlist exists to answer -- re-added here on that citation, not
+    #   on the earlier, unevidenced "believed" claim.
+    #
+    # Adding any future name here is a decision, not a default -- state
+    # real evidence (a run ID, a date, what it actually proved) the same
+    # way, or leave the name off and let {UnconfiguredNativeGemError} do
+    # its job -- see that class's own doc comment.
+    #
+    # @return [Array<String>]
+    REPACK_ONLY_GEMS = %w[ox curses].freeze
+    private_constant :REPACK_ONLY_GEMS
+
     # @param build_planner [BuildPlanner]
     # @param gemspec_normalizer [GemspecNormalizer]
     # @param patch_applier [PatchApplier]
@@ -70,17 +173,22 @@ module Ruby4Lich5
     #   platform_asset:, msys2_packages:, vendoring_role:, patches_applied:}+
     #   entry per gem in the plan, in the same dependency order
     #   {BuildPlanner#plan_for} returns. +patches_applied+ is +[]+ for
-    #   anything not +:native_self_contained+. +vendoring_role+ is +nil+ for
-    #   the same non-self-contained entries -- see {VendoringRoleClassifier}
-    #   for +:vendoring_root+ vs. +:vendoring_dependent+.
+    #   anything not +:native_self_contained+, and also +[]+ for a
+    #   +:native_self_contained+ entry outside {GTK3_STACK} (see the class
+    #   doc comment). +vendoring_role+ is +nil+ for the same non-self-
+    #   contained entries -- see {VendoringRoleClassifier} for
+    #   +:vendoring_root+ vs. +:vendoring_dependent+.
     # @raise [ClosureResolver::ResolutionError] if the requested gem+version
     #   can't be resolved at all
     # @raise [BuildPlanner::UnbuildableGemError] if any gem in the closure
     #   classifies as +:native_needs_system_lib+
-    # @raise [GemspecNormalizer::NormalizationError] if a self-contained
-    #   gem's gemspec is missing or malformed in a way normalization can't
-    #   work around
-    # @raise [PatchApplier::PatchError] if a self-contained gem's curated
+    # @raise [UnconfiguredNativeGemError] if any gem in the closure
+    #   classifies as +:native_self_contained+ but is neither part of
+    #   {GTK3_STACK} nor on the explicit {REPACK_ONLY_GEMS} allowlist
+    # @raise [GemspecNormalizer::NormalizationError] if a {GTK3_STACK}
+    #   member's gemspec is missing or malformed in a way normalization
+    #   can't work around
+    # @raise [PatchApplier::PatchError] if a {GTK3_STACK} member's curated
     #   patch doesn't apply cleanly against its actual extracted source
     def prepare(gem_name, version, platform:, ruby_abi:, source_root:)
       plan = @build_planner.plan_for(gem_name, version, platform: platform, ruby_abi: ruby_abi)
@@ -119,6 +227,7 @@ module Ruby4Lich5
     #   closure) was never passed through that same check, so this method
     #   re-asserts it explicitly rather than silently normalizing/patching
     #   a gem this project already knows cannot be built
+    # @raise [UnconfiguredNativeGemError] see {#prepare}
     # @raise [GemspecNormalizer::NormalizationError] see {#prepare}
     # @raise [PatchApplier::PatchError] see {#prepare}
     def prepare_from_plan(plan, platform:, source_root:)
@@ -133,6 +242,16 @@ module Ruby4Lich5
         names = unbuildable.map { |entry| "#{entry.fetch(:name)} #{entry.fetch(:version)}: #{entry.fetch(:classification).reason}" }
         raise BuildPlanner::UnbuildableGemError, "plan contains unbuildable gem(s):\n#{names.join("\n")}"
       end
+
+      # Preflighted here, before any normalize/patch call -- real gap,
+      # found in review 2026-07-13: this check used to live only inside
+      # #prepare_one, discovered entry by entry during the #map below. A
+      # plan ordered [gtk3, some-new-gem] would normalize/patch gtk3 (real
+      # filesystem mutations) before ever reaching some-new-gem and raising
+      # -- the exact "fail before any mutation" guarantee the unbuildable
+      # check above already gets right, this one didn't.
+      unconfigured = plan.select { |entry| unconfigured_native_self_contained?(entry.fetch(:classification), entry.fetch(:name)) }
+      raise_unconfigured!(unconfigured.map { |entry| entry.fetch(:name) }) unless unconfigured.empty?
 
       vendoring_roles = @vendoring_role_classifier.classify(plan)
 
@@ -163,7 +282,7 @@ module Ruby4Lich5
       name = entry.fetch(:name)
       gem_root = File.join(source_root, name)
 
-      patches_applied = classification.self_contained? ? prepare_self_contained(name, gem_root, platform, plan) : []
+      patches_applied = self_contained_patches_applied(classification, name, gem_root, platform, plan)
 
       {
         name: name,
@@ -175,6 +294,43 @@ module Ruby4Lich5
         vendoring_role: vendoring_roles[name],
         patches_applied: patches_applied
       }
+    end
+
+    # @return [Boolean] true for a +:native_self_contained+ gem that is
+    #   neither part of {GTK3_STACK} nor on the explicit {REPACK_ONLY_GEMS}
+    #   allowlist -- the one condition {#prepare_from_plan} preflights for
+    #   the whole plan before any mutation, and {#self_contained_patches_applied}
+    #   re-checks per entry as a structural (should be unreachable) backstop.
+    def unconfigured_native_self_contained?(classification, name)
+      classification.self_contained? && !GTK3_STACK.include?(name) && !REPACK_ONLY_GEMS.include?(name)
+    end
+
+    # @param names [Array<String>]
+    # @raise [UnconfiguredNativeGemError]
+    def raise_unconfigured!(names)
+      raise UnconfiguredNativeGemError,
+            "gem(s) #{names.join(', ')} classify native_self_contained but are neither part of the fixed " \
+            "Ruby-GNOME/GTK3 stack (#{GTK3_STACK.join(', ')}) nor on the explicit repack-only allowlist " \
+            "(#{REPACK_ONLY_GEMS.join(', ')}). Add each to REPACK_ONLY_GEMS only after confirming -- the same " \
+            'way ox was confirmed live -- that it genuinely needs no vendor-dir/ABI-require patching; do not ' \
+            'assume it.'
+    end
+
+    # @return [Array<Hash>] {PatchApplier#apply_all}'s own result for a
+    #   {GTK3_STACK} member; +[]+ for anything not +:native_self_contained+
+    #   at all; for a +:native_self_contained+ gem outside {GTK3_STACK},
+    #   +[]+ only if it is on the explicit {REPACK_ONLY_GEMS} allowlist.
+    #   The remaining case ({UnconfiguredNativeGemError}) should already be
+    #   unreachable here -- {#prepare_from_plan} preflights the whole plan
+    #   for it first -- but is re-checked per entry anyway as a structural
+    #   backstop, not trusted to the caller alone.
+    # @raise [UnconfiguredNativeGemError]
+    def self_contained_patches_applied(classification, name, gem_root, platform, plan)
+      return [] unless classification.self_contained?
+      return prepare_self_contained(name, gem_root, platform, plan) if GTK3_STACK.include?(name)
+      return [] if REPACK_ONLY_GEMS.include?(name)
+
+      raise_unconfigured!([name])
     end
 
     # @return [Array<Hash>] {PatchApplier#apply_all}'s return value verbatim
