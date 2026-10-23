@@ -195,7 +195,7 @@ end;
 // this iteration, see fetch-lich.ps1's own header for why).
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  ScriptPath, DestDir, CmdExe, XcopyDest, Params: String;
+  ScriptPath, DestDir, CmdExe, XcopyDest, Params, LinkPath, RubyDir: String;
   ResultCode: Integer;
 begin
   if (CurStep = ssPostInstall) and IsComponentSelected('lich') then
@@ -244,5 +244,52 @@ begin
         Abort;
       end;
     end;
+  end;
+
+  // Point a stable {app}\current at the versioned Ruby tree we just laid down,
+  // so front-ends can hardcode {app}\current\bin instead of a path that moves
+  // every time the baked Ruby version changes. Uses a directory JUNCTION
+  // (mklink /J), not a symbolic link (mklink /D), on purpose: junctions need
+  // no elevation, and this installer is PrivilegesRequired=lowest -- a /D link
+  // would fail for a standard user unless Developer Mode happened to be on.
+  // Both ends are local, same-volume, absolute paths -- exactly what a
+  // junction handles; front-ends see current\bin\ruby.exe transparently.
+  // Separate rubygem-gated block (not folded into the lich block above) so it
+  // runs for a "rubyonly" install too. Non-fatal by design: Ruby is already
+  // fully installed and usable at the versioned path, so a junction hiccup
+  // (AV interference, a pre-existing non-empty 'current') must not abort an
+  // otherwise-good install.
+  if (CurStep = ssPostInstall) and IsComponentSelected('rubygem') then
+  begin
+    CmdExe := ExpandConstant('{cmd}');
+    LinkPath := ExpandConstant('{app}\current');
+    RubyDir := ExpandConstant('{app}\{#RubyVersion}');
+
+    // Clear any prior 'current' first so a version bump re-points cleanly --
+    // mklink refuses to create over an existing name. Plain rmdir (no /s)
+    // removes only a junction's reparse point, never the target's files, and
+    // fails safe on a real non-empty directory rather than deleting it.
+    // Result ignored: we only care whether the mklink below succeeds.
+    Exec(CmdExe, '/c rmdir "' + LinkPath + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+    Params := '/c mklink /J "' + LinkPath + '" "' + RubyDir + '"';
+    if not Exec(CmdExe, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+      Log('Could not create ' + LinkPath + ' junction -> ' + RubyDir + ' (non-fatal; versioned path still works).');
+  end;
+end;
+
+// Remove the {app}\current junction on uninstall. Plain rmdir (no /s) deletes
+// only the reparse point, never the target's contents, and is a harmless
+// no-op if 'current' was never created (e.g. a Lich-only install).
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  CmdExe, LinkPath: String;
+  ResultCode: Integer;
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    CmdExe := ExpandConstant('{cmd}');
+    LinkPath := ExpandConstant('{app}\current');
+    Exec(CmdExe, '/c rmdir "' + LinkPath + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 end;
