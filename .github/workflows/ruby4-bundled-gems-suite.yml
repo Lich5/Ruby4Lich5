@@ -6,9 +6,10 @@
 # "Prepare native gems" below, calling bin/prepare_native_gems.rb
 # (Ruby4Lich5::NativeGemPreparer, backed by Classifier/ClosureResolver/BuildPlanner/
 # GemspecNormalizer/PatchApplier, all tested). The glib2-gc-repair input this used to
-# have is gone -- PatchApplier's curated patches (glib2/property-retention-fix.rb,
-# gobject-introspection/gc-compact-safety-fix.rb) apply unconditionally now, no flag
-# needed, matching every other native gem's patches falling out cleanly when none exist.
+# have is gone -- PatchApplier's curated patches under patches/<gem>/ apply
+# unconditionally, no flag needed. The glib2 property-retention and gobject-introspection
+# GC.compact source fixes were retired: lich-5's Lich::Util::GtkCompaction pins the
+# converter Procs at runtime on stock ruby-gnome (elanthia-online/lich-5#1429).
 #
 # Still NOT generalized: MSYS2 package installation and the actual native compile below
 # still target the fixed GTK3 stack directly, not the JSON plan's own msys2_packages per
@@ -40,7 +41,7 @@ on:
       ruby-gnome-version:
         description: "Ruby-GNOME suite version to build from upstream source -- also gtk3's own root version for dynamic resolution (F2)."
         required: false
-        default: "4.3.6"
+        default: "4.3.9"
       runtime-gems:
         description: "Top-level Lich runtime gems to install from the staged local bundle."
         required: false
@@ -75,7 +76,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -306,7 +307,7 @@ jobs:
       # (upstream MSYS2's own package graph, not ours to fix).
       - name: Install MSYS2 UCRT build surface
         id: msys2
-        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: UCRT64
           update: true
@@ -821,7 +822,7 @@ jobs:
           Write-Host "::endgroup::"
 
       - name: Upload native gems build plan (debug info -- survives the runner)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-gems-build-plan
           path: ${{ env.NATIVE_GEMS_PLAN }}
@@ -836,7 +837,7 @@ jobs:
       # republished under this project's own tag), replacing the old
       # native-runtime-gems input there too.
       - name: Upload resolution lock (cross-job relay)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: resolution-lock
           path: ${{ env.RESOLUTION_LOCK }}
@@ -1270,7 +1271,7 @@ jobs:
           }
 
       - name: Upload required loads manifest (debug info -- survives the runner)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: required-loads-manifest
           path: ${{ env.REQUIRED_LOADS_MANIFEST }}
@@ -1544,7 +1545,7 @@ jobs:
       # the next one, minutes apart within the same run -- distinct from the real,
       # 90-day-retention final artifact the smoke job uploads once it's done.
       - name: Upload packaged runtime gem bundle (intermediate, cross-job relay)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ruby4-bundled-gems-pkg-dir-intermediate
           path: pkg/*
@@ -1578,7 +1579,7 @@ jobs:
       # other checkout in this repo; checkout itself needs no GH_TOKEN and
       # happens before any untrusted gem code runs.
       - name: Checkout repository (shared verified-download helper only)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           sparse-checkout: |
@@ -1586,7 +1587,7 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Download packaged runtime gem bundle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ruby4-bundled-gems-pkg-dir-intermediate
           path: pkg
@@ -1759,7 +1760,7 @@ jobs:
           Copy-Item (Join-Path $pkgDir 'install-runtime-gems.cmd') (Join-Path $distPkg 'install-runtime-gems.cmd') -Force
 
       - name: Upload Ruby4 bundled gems
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ruby4-bundled-gems-windows-ucrt64
           path: dist/pkg/*
@@ -1832,7 +1833,7 @@ jobs:
 
     steps:
       - name: Download staged runtime gem bundle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ruby4-bundled-gems-windows-ucrt64
           path: dist/pkg
@@ -1844,7 +1845,7 @@ jobs:
       # R4L5- tag) -- see "Upload resolution lock (cross-job relay)" in
       # the build job above.
       - name: Download resolution lock
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: resolution-lock
           path: dist
@@ -1853,7 +1854,7 @@ jobs:
       # principle as bin/prepare_native_gems.rb -- doesn't need the target
       # Ruby tree this job never downloads, just *some* modern Ruby on PATH.
       - name: Set up Ruby (for gem manifest generation)
-        uses: ruby/setup-ruby@d45b1a4e94b71acab930e56e79c6aa188764e7f9 # v1.316.0
+        uses: ruby/setup-ruby@26e5b7d197ebf60545ee9667bcbace0be11ccaec # v1.334.0
 
       # Publishes only after the clean-install smoke test already passed --
       # never a gem that merely compiled. Per docs/PUNCHLIST-remaining-work.md's

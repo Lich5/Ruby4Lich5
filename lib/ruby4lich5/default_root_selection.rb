@@ -48,7 +48,7 @@ module Ruby4Lich5
     #   +ruby-gnome-version+ default -- the one real special-case root
     #   version source (Phase 17 SS8); every other root resolves via
     #   {RubygemsClient#latest_version}
-    GTK3_VERSION = '4.3.6'
+    GTK3_VERSION = '4.3.9'
 
     # @return [Array<String>] every other +runtime-gems+ default root,
     #   matching +ruby4-bundled-gems-suite.yml+'s own real default list --
