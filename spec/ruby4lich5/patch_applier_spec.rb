@@ -263,16 +263,7 @@ RSpec.describe Ruby4Lich5::PatchApplier do
   describe 'the real curated patches' do
     subject(:applier) { described_class.new } # default patches_root -- the real committed patches/
 
-    context 'glib2 (dll-path-and-require-abi + property-retention-fix, both apply together)' do
-      let(:before_c_source) do
-        <<~C
-          static VALUE
-          rg_s_set_property(GObject *object, guint property_id, const GValue *value, GParamSpec *pspec)
-          {
-              rb_funcall(GOBJ2RVAL(object), ruby_setter, 1, GVAL2RVAL(value));
-          }
-        C
-      end
+    context 'glib2 dll-path-and-require-abi' do
       let(:before_rb_source) do
         <<~RUBY
           def prepend_dll_path(path)
@@ -294,24 +285,13 @@ RSpec.describe Ruby4Lich5::PatchApplier do
         RUBY
       end
 
-      def write_glib2_source(source_dir, before_c_source, before_rb_source)
-        write_source(source_dir, 'ext/glib2/rbgobj_object.c', before_c_source)
-        write_source(source_dir, 'lib/glib2.rb', before_rb_source)
-      end
-
-      it 'applies both patches against realistic source' do
+      it 'applies against realistic source' do
         Dir.mktmpdir do |source_dir|
-          write_glib2_source(source_dir, before_c_source, before_rb_source)
+          write_source(source_dir, 'lib/glib2.rb', before_rb_source)
 
           result = applier.apply_all('glib2', source_dir)
 
-          expect(result).to contain_exactly(
-            { patch: 'dll-path-and-require-abi', status: :applied },
-            { patch: 'property-retention-fix', status: :applied }
-          )
-          patched_c = File.read(File.join(source_dir, 'ext/glib2/rbgobj_object.c'))
-          expect(patched_c).to include('G_CHILD_SET(rb_object')
-          expect(patched_c).not_to include('rb_funcall(GOBJ2RVAL(object), ruby_setter, 1, GVAL2RVAL(value));')
+          expect(result).to eq([{ patch: 'dll-path-and-require-abi', status: :applied }])
           patched_rb = File.read(File.join(source_dir, 'lib/glib2.rb'))
           expect(patched_rb).to include('GLib.prepend_dll_path(vendor_dir + "bin")')
           # rubocop:disable Lint/InterpolationCheck -- asserting the literal
@@ -324,15 +304,12 @@ RSpec.describe Ruby4Lich5::PatchApplier do
 
       it 'is idempotent against already-patched source' do
         Dir.mktmpdir do |source_dir|
-          write_glib2_source(source_dir, before_c_source, before_rb_source)
+          write_source(source_dir, 'lib/glib2.rb', before_rb_source)
           applier.apply_all('glib2', source_dir)
 
           result = applier.apply_all('glib2', source_dir)
 
-          expect(result).to contain_exactly(
-            { patch: 'dll-path-and-require-abi', status: :already_applied },
-            { patch: 'property-retention-fix', status: :already_applied }
-          )
+          expect(result).to eq([{ patch: 'dll-path-and-require-abi', status: :already_applied }])
         end
       end
     end
@@ -378,75 +355,7 @@ RSpec.describe Ruby4Lich5::PatchApplier do
       end
     end
 
-    context 'gobject-introspection gc-compact-safety-fix' do
-      let(:before_source) do
-        <<~C
-          static const gchar *boxed_class_converters_name = "@@boxed_class_converters";
-          static const gchar *object_class_converters_name = "@@object_class_converters";
-
-          typedef struct {
-              GType type;
-              VALUE rb_converters;
-              VALUE rb_converter;
-          } BoxedInstance2RObjData;
-
-          static void
-          boxed_class_converter_free(gpointer user_data)
-          {
-              BoxedInstance2RObjData *data = user_data;
-              rb_ary_delete(data->rb_converters, data->rb_converter);
-              g_free(data);
-          }
-
-          static VALUE
-          rg_s_register_boxed_class_converter(G_GNUC_UNUSED VALUE klass, VALUE rb_gtype)
-          {
-              RGConvertTable table;
-              BoxedInstance2RObjData *data;
-              VALUE boxed_class_converters;
-
-              data->rb_converter = rb_block_proc();
-              boxed_class_converters = rb_cv_get(klass, boxed_class_converters_name);
-              rb_ary_push(boxed_class_converters, data->rb_converter);
-              table.user_data = data;
-          }
-
-          typedef struct {
-              GType type;
-              VALUE rb_converters;
-              VALUE rb_converter;
-          } ObjectInstance2RObjData;
-
-          static void
-          object_class_converter_free(gpointer user_data)
-          {
-              ObjectInstance2RObjData *data = user_data;
-              rb_ary_delete(data->rb_converters, data->rb_converter);
-              g_free(data);
-          }
-
-          static VALUE
-          rg_s_register_object_class_converter(G_GNUC_UNUSED VALUE klass, VALUE rb_gtype)
-          {
-              RGConvertTable table;
-              ObjectInstance2RObjData *data;
-              VALUE object_class_converters;
-
-              data->rb_converter = rb_block_proc();
-              object_class_converters = rb_cv_get(klass, object_class_converters_name);
-              rb_ary_push(object_class_converters, data->rb_converter);
-              table.user_data = data;
-          }
-
-          void
-          Init_something(void)
-          {
-              rb_cv_set(RG_TARGET_NAMESPACE, boxed_class_converters_name, rb_ary_new());
-              rb_cv_set(RG_TARGET_NAMESPACE, object_class_converters_name, rb_ary_new());
-          }
-        C
-      end
-
+    context 'gobject-introspection (dll-path-and-require-abi + vendor-rubygems-plugin)' do
       let(:before_rb_source) do
         <<~RUBY
           require "glib2"
@@ -458,29 +367,16 @@ RSpec.describe Ruby4Lich5::PatchApplier do
         RUBY
       end
 
-      def write_gi_source(source_dir, before_source, before_rb_source)
-        write_source(source_dir, 'ext/gobject-introspection/rb-gi-loader.c', before_source)
-        write_source(source_dir, 'lib/gobject-introspection.rb', before_rb_source)
-      end
-
-      it 'applies all three patches against realistic source' do
+      it 'applies both patches against realistic source' do
         Dir.mktmpdir do |source_dir|
-          write_gi_source(source_dir, before_source, before_rb_source)
+          write_source(source_dir, 'lib/gobject-introspection.rb', before_rb_source)
 
           result = applier.apply_all('gobject-introspection', source_dir)
 
           expect(result).to contain_exactly(
             { patch: 'dll-path-and-require-abi', status: :applied },
-            { patch: 'gc-compact-safety-fix', status: :applied },
             { patch: 'vendor-rubygems-plugin', status: :applied }
           )
-          patched = File.read(File.join(source_dir, 'ext/gobject-introspection/rb-gi-loader.c'))
-          expect(patched).not_to include('boxed_class_converters_name')
-          expect(patched).not_to include('object_class_converters_name')
-          expect(patched).not_to include('VALUE rb_converters;')
-          expect(patched).not_to include('rb_ary_delete(data->rb_converters')
-          expect(patched.scan('rb_gc_register_address(&data->rb_converter)').size).to eq(2)
-          expect(patched.scan('rb_gc_unregister_address(&data->rb_converter)').size).to eq(2)
           patched_rb = File.read(File.join(source_dir, 'lib/gobject-introspection.rb'))
           expect(patched_rb).to include('GLib.prepend_dll_path(vendor_dir + "bin")')
           expect(patched_rb).to include('vendor_dir + "lib" + "girepository-1.0"')
@@ -495,14 +391,13 @@ RSpec.describe Ruby4Lich5::PatchApplier do
 
       it 'is idempotent against already-patched source' do
         Dir.mktmpdir do |source_dir|
-          write_gi_source(source_dir, before_source, before_rb_source)
+          write_source(source_dir, 'lib/gobject-introspection.rb', before_rb_source)
           applier.apply_all('gobject-introspection', source_dir)
 
           result = applier.apply_all('gobject-introspection', source_dir)
 
           expect(result).to contain_exactly(
             { patch: 'dll-path-and-require-abi', status: :already_applied },
-            { patch: 'gc-compact-safety-fix', status: :already_applied },
             { patch: 'vendor-rubygems-plugin', status: :already_applied }
           )
         end

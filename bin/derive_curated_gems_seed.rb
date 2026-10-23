@@ -33,7 +33,7 @@
 # "tzinfo-data-runtime" unit -- a shipping-artifact grouping this registry
 # doesn't need to mirror, since each is still independently a real
 # requested root).
-# - gtk3, at the workflow's ruby-gnome-version default (4.3.6) -- the one
+# - gtk3, at the workflow's ruby-gnome-version default (4.3.9) -- the one
 #   real special-case root version source, per Phase 17 section 8.
 # - Every other runtime-gems default, each resolved to its real "latest" --
 #   non-prerelease, maximal by real Gem::Version comparison, never a string
