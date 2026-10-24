@@ -109,8 +109,9 @@ later rather than a redesign.
 
 ## Org home
 
-Currently under the `Lich5` org. Expected to transition to `elanthia-online` around
-January 2027, timed to the anticipated release/testing of Ruby 4.1.0.
+Ruby4Lich5 is maintained under the `elanthia-online` org at
+[elanthia-online/Ruby4Lich5](https://github.com/elanthia-online/Ruby4Lich5),
+following its transfer from `Lich5`.
 
 ## Roadmap phases (see [`docs/ROADMAP-woven-plan.md`](docs/ROADMAP-woven-plan.md) / [`docs/GEM-FACTORY-vision.md`](docs/GEM-FACTORY-vision.md))
 

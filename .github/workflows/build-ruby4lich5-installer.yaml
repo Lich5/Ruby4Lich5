@@ -1,10 +1,7 @@
 name: Build Ruby4Lich5 Installer (baked)
 
-# Lives directly on Lich5/Ruby4Lich5 -- confirmed 2026-07-10 against real run
-# history (every real installer build so far, including R4L5-v040.001.002,
-# dispatched and ran right here); an earlier draft of this comment claimed it
-# lived on Lich5/lich-5 (the build/test fork), which was stale documentation,
-# not current practice. Builds the baked, non-DevKit installer: a stock
+# Lives directly in elanthia-online/Ruby4Lich5, which owns installer builds.
+# Builds the baked, non-DevKit installer: a stock
 # RubyInstaller tree (installed via .exe with /components=ruby) with the
 # precompiled binary gems gem-installed straight in on the runner (no MSYS2,
 # no compile, no prune). The installer just lays that finished tree down --
@@ -29,9 +26,9 @@ on:
       gem-repo:
         description: "Repo publishing the gem-bundle Release."
         required: false
-        default: "Lich5/Ruby4Lich5"
+        default: "elanthia-online/Ruby4Lich5"
       gem-release-tag:
-        description: "Gem-bundle Release tag to pull. Defaults to the current production roll-up bundle -- a single, fixed, eternal tag under the locked R4L5 naming convention (its content changes via gh release upload --clobber, not a new tag per version; see docs/PUNCHLIST-remaining-work.md's naming-convention section). Lich5/Ruby4Lich5 now hosts several differently-scoped releases at once (per-gem, roll-up), so 'newest on the repo' is no longer a safe empty-string fallback the way it was against a single-purpose repo. Never the 'Latest'-flagged release on this repo by design -- gem releases intentionally never claim that slot; see docs/PUNCHLIST-remaining-work.md's versioning section."
+        description: "Gem-bundle Release tag to pull. Defaults to the current production roll-up bundle -- a single, fixed, eternal tag under the locked R4L5 naming convention (its content changes via gh release upload --clobber, not a new tag per version; see docs/PUNCHLIST-remaining-work.md's naming-convention section). elanthia-online/Ruby4Lich5 now hosts several differently-scoped releases at once (per-gem, roll-up), so 'newest on the repo' is no longer a safe empty-string fallback the way it was against a single-purpose repo. Never the 'Latest'-flagged release on this repo by design -- gem releases intentionally never claim that slot; see docs/PUNCHLIST-remaining-work.md's versioning section."
         required: false
         default: "R4L5-gem-bundle-x64-mingw-ucrt"
       installer-version:

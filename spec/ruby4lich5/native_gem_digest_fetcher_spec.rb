@@ -20,21 +20,21 @@ RSpec.describe Ruby4Lich5::NativeGemDigestFetcher do
         { 'name' => 'runtime-gems-manifest.txt', 'digest' => "sha256:#{'b' * 64}" }
       ] }.to_json
       runner = ->(_cmd) { success(body) }
-      fetcher = described_class.new(repo: 'Lich5/Ruby4Lich5', platform: 'x64-mingw-ucrt', runner: runner)
+      fetcher = described_class.new(repo: 'elanthia-online/Ruby4Lich5', platform: 'x64-mingw-ucrt', runner: runner)
 
       expect(fetcher.call('sqlite3', '2.9.5')).to eq("sha256:#{'a' * 64}")
     end
 
     it 'raises when gh api itself fails' do
       runner = ->(_cmd) { failure('gh: release not found') }
-      fetcher = described_class.new(repo: 'Lich5/Ruby4Lich5', platform: 'x64-mingw-ucrt', runner: runner)
+      fetcher = described_class.new(repo: 'elanthia-online/Ruby4Lich5', platform: 'x64-mingw-ucrt', runner: runner)
 
       expect { fetcher.call('sqlite3', '2.9.5') }.to raise_error(described_class::FetchError, /gh api failed/)
     end
 
     it 'raises when no matching asset is present' do
       runner = ->(_cmd) { success({ 'assets' => [] }.to_json) }
-      fetcher = described_class.new(repo: 'Lich5/Ruby4Lich5', platform: 'x64-mingw-ucrt', runner: runner)
+      fetcher = described_class.new(repo: 'elanthia-online/Ruby4Lich5', platform: 'x64-mingw-ucrt', runner: runner)
 
       expect { fetcher.call('sqlite3', '2.9.5') }.to raise_error(described_class::FetchError, /no .* asset found/)
     end
@@ -42,28 +42,28 @@ RSpec.describe Ruby4Lich5::NativeGemDigestFetcher do
     it 'raises when the matching asset has a malformed digest' do
       body = { 'assets' => [{ 'name' => 'R4L5-sqlite3-2.9.5-x64-mingw-ucrt.gem', 'digest' => 'not-a-digest' }] }.to_json
       runner = ->(_cmd) { success(body) }
-      fetcher = described_class.new(repo: 'Lich5/Ruby4Lich5', platform: 'x64-mingw-ucrt', runner: runner)
+      fetcher = described_class.new(repo: 'elanthia-online/Ruby4Lich5', platform: 'x64-mingw-ucrt', runner: runner)
 
       expect { fetcher.call('sqlite3', '2.9.5') }.to raise_error(described_class::FetchError, /malformed digest/)
     end
 
     it 'raises when gh api returns unparseable JSON' do
       runner = ->(_cmd) { success('not json') }
-      fetcher = described_class.new(repo: 'Lich5/Ruby4Lich5', platform: 'x64-mingw-ucrt', runner: runner)
+      fetcher = described_class.new(repo: 'elanthia-online/Ruby4Lich5', platform: 'x64-mingw-ucrt', runner: runner)
 
       expect { fetcher.call('sqlite3', '2.9.5') }.to raise_error(described_class::FetchError, /unparseable JSON/)
     end
 
     it 'raises rather than a raw NoMethodError when gh api returns valid JSON that is not an object' do
       runner = ->(_cmd) { success('[]') }
-      fetcher = described_class.new(repo: 'Lich5/Ruby4Lich5', platform: 'x64-mingw-ucrt', runner: runner)
+      fetcher = described_class.new(repo: 'elanthia-online/Ruby4Lich5', platform: 'x64-mingw-ucrt', runner: runner)
 
       expect { fetcher.call('sqlite3', '2.9.5') }.to raise_error(described_class::FetchError, /unexpected JSON shape/)
     end
 
     it 'raises rather than a raw NoMethodError when "assets" is present but not an array' do
       runner = ->(_cmd) { success({ 'assets' => 'not-an-array' }.to_json) }
-      fetcher = described_class.new(repo: 'Lich5/Ruby4Lich5', platform: 'x64-mingw-ucrt', runner: runner)
+      fetcher = described_class.new(repo: 'elanthia-online/Ruby4Lich5', platform: 'x64-mingw-ucrt', runner: runner)
 
       expect { fetcher.call('sqlite3', '2.9.5') }.to raise_error(described_class::FetchError, /unexpected JSON shape/)
     end
@@ -71,7 +71,7 @@ RSpec.describe Ruby4Lich5::NativeGemDigestFetcher do
     it 'validates the gem name against SafeToken before ever shelling out' do
       runner = double('runner')
       expect(runner).not_to receive(:call)
-      fetcher = described_class.new(repo: 'Lich5/Ruby4Lich5', platform: 'x64-mingw-ucrt', runner: runner)
+      fetcher = described_class.new(repo: 'elanthia-online/Ruby4Lich5', platform: 'x64-mingw-ucrt', runner: runner)
 
       expect { fetcher.call('sqlite3; rm -rf /', '2.9.5') }.to raise_error(ArgumentError)
     end

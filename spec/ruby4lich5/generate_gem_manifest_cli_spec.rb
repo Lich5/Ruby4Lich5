@@ -121,7 +121,7 @@ RSpec.describe 'bin/generate_gem_manifest.rb (CLI integration)' do
     write_fake_gh(@bin_dir, @pkg_dir, all_native.to_h { |name| [name, '1.0.0'] })
     write_lock_json(@lock_path, all_native)
 
-    args = [@lock_path, 'Lich5/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
+    args = [@lock_path, 'elanthia-online/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
             'R4L5-gem-bundle-x64-mingw-ucrt.zip', "sha256:#{'c' * 64}", @pkg_dir, @out_path]
     stdout_and_err, status = run_cli(args)
 
@@ -142,7 +142,7 @@ RSpec.describe 'bin/generate_gem_manifest.rb (CLI integration)' do
     # the real bug this whole design fixes (2026-07-10 review finding).
     gtk3_unit = units.find { |u| u['id'] == 'gtk3-runtime' }
     expect(gtk3_unit['artifact']['url']).to start_with(
-      'https://github.com/Lich5/Ruby4Lich5/releases/download/R4L5-gem-bundle-x64-mingw-ucrt-candidate/'
+      'https://github.com/elanthia-online/Ruby4Lich5/releases/download/R4L5-gem-bundle-x64-mingw-ucrt-candidate/'
     )
   end
 
@@ -161,7 +161,7 @@ RSpec.describe 'bin/generate_gem_manifest.rb (CLI integration)' do
     write_fake_gh(@bin_dir, @pkg_dir, all_native.to_h { |name| [name, '1.0.0'] })
     write_lock_json(@lock_path, all_native)
 
-    args = [@lock_path, 'Lich5/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
+    args = [@lock_path, 'elanthia-online/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
             'R4L5-gem-bundle-x64-mingw-ucrt.zip', "sha256:#{'c' * 64}", @pkg_dir, @out_path]
     stdout_and_err, status = run_cli(args)
 
@@ -176,7 +176,7 @@ RSpec.describe 'bin/generate_gem_manifest.rb (CLI integration)' do
     write_fake_gh(@bin_dir, @pkg_dir, {})
     write_lock_json(@lock_path, ['sqlite3']) # no gemspec ever built for sqlite3 in @pkg_dir
 
-    args = [@lock_path, 'Lich5/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
+    args = [@lock_path, 'elanthia-online/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
             'R4L5-gem-bundle-x64-mingw-ucrt.zip', "sha256:#{'c' * 64}", @pkg_dir, @out_path]
     _stdout_and_err, status = run_cli(args)
 
@@ -205,7 +205,7 @@ RSpec.describe 'bin/generate_gem_manifest.rb (CLI integration)' do
     )
     File.write(@lock_path, JSON.pretty_generate(lock.to_h))
 
-    args = [@lock_path, 'Lich5/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
+    args = [@lock_path, 'elanthia-online/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
             'R4L5-gem-bundle-x64-mingw-ucrt.zip', "sha256:#{'c' * 64}", @pkg_dir, @out_path]
     stdout_and_err, status = run_cli(args)
 
@@ -217,7 +217,7 @@ RSpec.describe 'bin/generate_gem_manifest.rb (CLI integration)' do
   it 'exits with code 2 and writes nothing when the lock file is malformed' do
     File.write(@lock_path, 'not valid json')
 
-    args = [@lock_path, 'Lich5/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
+    args = [@lock_path, 'elanthia-online/Ruby4Lich5', 'R4L5-gem-bundle-x64-mingw-ucrt-candidate',
             'R4L5-gem-bundle-x64-mingw-ucrt.zip', "sha256:#{'c' * 64}", @pkg_dir, @out_path]
     _stdout_and_err, status = run_cli(args)
 
