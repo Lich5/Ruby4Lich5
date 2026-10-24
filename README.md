@@ -138,12 +138,13 @@ following its transfer from `Lich5`.
   fat gem bundling every supported ABI internally (the Nokogiri pattern), dispatched at
   load time by the gem's own code.
 - **Repo topology:** one repo. Ruby4Lich5 is both the front door and the gems server.
-- **Curation, pinning, and authorization:** manual dispatch only, EO-Admin-gated
+- **Curation, pinning, and authorization:** manual dispatch only, with EO Admin
+  authorization as the intended policy
   (mirrors `elanthia-online/lich-5`'s own PR-review pattern, minus Release Please — gem
   versions are upstream-supplied, not commit-derived). Installer versioning is owned by
-  Ruby4Lich5 itself, not by `lich-5`. Authorization needs a small refinement: scope
-  Ruby4Lich5's write access to a Lich5-org team mirroring EO's Admin team, rather than
-  relying on the Lich5 org's current write-by-default for all members.
+  Ruby4Lich5 itself, not by `lich-5`. Following the transfer to `elanthia-online`,
+  verification of repository access and branch protection against that authorization
+  policy remains pending as a separate step.
 - **Release flow with `elanthia-online/lich-5`:** EO publishes 4 archive artifacts
   (tarball/zip x repo/app) and retires its existing embedded installer-build job.
   Ruby4Lich5 consumes the app archive, publishes its own gem/bundle/installer releases,

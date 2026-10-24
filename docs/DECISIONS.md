@@ -80,15 +80,15 @@ commit history, and has no visibility into a Ruby4Lich5-side gem rebuild or Ruby
 addition. Version identity for the installer has to be decided where the facts about its
 contents actually live — Ruby4Lich5 — regardless of which org either repo sits in.
 
-**Authorization:** must be an EO Admin (the same 5 people who hold `admin`-level access
-on `elanthia-online/lich-5` via the "EO Admins" team: sandersch, ondreian, mrhoribu,
-OSXLich-Doug, MahtraDR). EO Maintainers (a broader group, working mostly on scripts and
-core Lich logic) are not part of this specific process. `Lich5` org's
-`default_repository_permission` is currently `write`, meaning every Lich5-org member
-(including two — AndreasWelch, Nisugi — who aren't EO members) has write access to
-Ruby4Lich5 by default today. **Refinement needed:** a Lich5-org team mirroring EO Admins'
-membership, with Ruby4Lich5's access scoped to that team (overriding the org-wide
-default for this one repo) plus branch protection requiring that team's review.
+**Authorization policy:** curation and promotion require an EO Admin. EO Maintainers
+(a broader group, working mostly on scripts and core Lich logic) are not part of this
+specific process.
+
+**Post-transfer update (2026-10-24):** Ruby4Lich5 is now under `elanthia-online`.
+The original July proposal to mirror EO Admins in a Lich5-org team, and its assumptions
+about Lich5-org default access, are superseded by the transfer. Verification of
+repository access and branch protection against the EO Admin authorization policy
+remains pending as a separate step.
 
 **Promotion always requires the same approval chain**, no exceptions — including
 promoting a beta-tested gem to production (see §7). No automation ever fires on a
