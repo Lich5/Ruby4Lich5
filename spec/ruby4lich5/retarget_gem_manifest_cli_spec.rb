@@ -15,10 +15,10 @@ RSpec.describe 'bin/retarget_gem_manifest.rb (CLI integration)' do
         'ruby_abi' => '4.0', 'platform' => 'x64-mingw-ucrt',
         'units' => [
           { 'id'       => 'gtk3-runtime',
-            'artifact' => { 'url' => "https://github.com/Lich5/Ruby4Lich5/releases/download/#{RETARGET_SPEC_CANDIDATE_TAG}/R4L5-gem-bundle-x64-mingw-ucrt.zip",
+            'artifact' => { 'url' => "https://github.com/elanthia-online/Ruby4Lich5/releases/download/#{RETARGET_SPEC_CANDIDATE_TAG}/R4L5-gem-bundle-x64-mingw-ucrt.zip",
                              'filename' => 'R4L5-gem-bundle-x64-mingw-ucrt.zip', 'sha256' => "sha256:#{'a' * 64}", 'archive' => 'zip' } },
           { 'id'       => 'sqlite3',
-            'artifact' => { 'url' => 'https://github.com/Lich5/Ruby4Lich5/releases/download/R4L5-sqlite3-2.9.5-x64-mingw-ucrt/R4L5-sqlite3-2.9.5-x64-mingw-ucrt.gem',
+            'artifact' => { 'url' => 'https://github.com/elanthia-online/Ruby4Lich5/releases/download/R4L5-sqlite3-2.9.5-x64-mingw-ucrt/R4L5-sqlite3-2.9.5-x64-mingw-ucrt.gem',
                              'filename' => 'R4L5-sqlite3-2.9.5-x64-mingw-ucrt.gem', 'sha256' => "sha256:#{'b' * 64}", 'archive' => 'gem' } }
         ]
       }]
@@ -48,13 +48,13 @@ RSpec.describe 'bin/retarget_gem_manifest.rb (CLI integration)' do
 
     gtk3_unit = units.find { |u| u['id'] == 'gtk3-runtime' }
     expect(gtk3_unit['artifact']['url']).to eq(
-      "https://github.com/Lich5/Ruby4Lich5/releases/download/#{RETARGET_SPEC_LIVE_TAG}/R4L5-gem-bundle-x64-mingw-ucrt.zip"
+      "https://github.com/elanthia-online/Ruby4Lich5/releases/download/#{RETARGET_SPEC_LIVE_TAG}/R4L5-gem-bundle-x64-mingw-ucrt.zip"
     )
     expect(gtk3_unit['artifact']['sha256']).to eq("sha256:#{'a' * 64}") # bytes unchanged, only the tag moved
 
     sqlite3_unit = units.find { |u| u['id'] == 'sqlite3' }
     expect(sqlite3_unit['artifact']['url']).to eq(
-      'https://github.com/Lich5/Ruby4Lich5/releases/download/R4L5-sqlite3-2.9.5-x64-mingw-ucrt/R4L5-sqlite3-2.9.5-x64-mingw-ucrt.gem'
+      'https://github.com/elanthia-online/Ruby4Lich5/releases/download/R4L5-sqlite3-2.9.5-x64-mingw-ucrt/R4L5-sqlite3-2.9.5-x64-mingw-ucrt.gem'
     )
   end
 

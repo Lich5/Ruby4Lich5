@@ -53,7 +53,7 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
       delivery_states_by_name: delivery_states_by_name,
       ruby_abi: '4.0',
       platform: 'x64-mingw-ucrt',
-      repo: 'Lich5/Ruby4Lich5',
+      repo: 'elanthia-online/Ruby4Lich5',
       bundle_asset: bundle_asset,
       pkg_dir: @pkg_dir,
       native_digest_lookup: native_digest_lookup,
@@ -119,7 +119,7 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
 
         expect(unit['members']).to include(*described_class::GTK3_STACK, 'red-colors', 'matrix')
         expect(unit['artifact']).to eq(
-          'url'      => 'https://github.com/Lich5/Ruby4Lich5/releases/download/R4L5-gem-bundle-x64-mingw-ucrt/R4L5-gem-bundle-x64-mingw-ucrt.zip',
+          'url'      => 'https://github.com/elanthia-online/Ruby4Lich5/releases/download/R4L5-gem-bundle-x64-mingw-ucrt/R4L5-gem-bundle-x64-mingw-ucrt.zip',
           'filename' => 'R4L5-gem-bundle-x64-mingw-ucrt.zip',
           'sha256'   => bundle_asset[:sha256],
           'archive'  => 'zip'
@@ -145,7 +145,7 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
 
         expect(unit['members']).to eq(['sqlite3'])
         expect(unit['artifact']).to eq(
-          'url'      => 'https://github.com/Lich5/Ruby4Lich5/releases/download/R4L5-sqlite3-2.9.5-x64-mingw-ucrt/R4L5-sqlite3-2.9.5-x64-mingw-ucrt.gem',
+          'url'      => 'https://github.com/elanthia-online/Ruby4Lich5/releases/download/R4L5-sqlite3-2.9.5-x64-mingw-ucrt/R4L5-sqlite3-2.9.5-x64-mingw-ucrt.gem',
           'filename' => 'R4L5-sqlite3-2.9.5-x64-mingw-ucrt.gem',
           'sha256'   => 'sha256:native-digest-sqlite3-2.9.5',
           'archive'  => 'gem'
@@ -166,7 +166,7 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
         generator = described_class.new(
           root_names: described_class::GTK3_STACK + ['sqlite3'],
           delivery_states_by_name: delivery_states(self_contained: described_class::GTK3_STACK + ['sqlite3']),
-          ruby_abi: '4.0', platform: 'x64-mingw-ucrt', repo: 'Lich5/Ruby4Lich5', bundle_asset: bundle_asset,
+          ruby_abi: '4.0', platform: 'x64-mingw-ucrt', repo: 'elanthia-online/Ruby4Lich5', bundle_asset: bundle_asset,
           pkg_dir: @pkg_dir, native_digest_lookup: counting_lookup, rubygems_client: rubygems_client,
           closure_resolver: stub_closure(closure)
         )
@@ -198,7 +198,7 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
         generator = described_class.new(
           root_names: described_class::GTK3_STACK + ['sqlite3'],
           delivery_states_by_name: delivery_states(self_contained: described_class::GTK3_STACK + ['sqlite3']),
-          ruby_abi: '4.0', platform: 'x64-mingw-ucrt', repo: 'Lich5/Ruby4Lich5', bundle_asset: bundle_asset,
+          ruby_abi: '4.0', platform: 'x64-mingw-ucrt', repo: 'elanthia-online/Ruby4Lich5', bundle_asset: bundle_asset,
           pkg_dir: @pkg_dir, native_digest_lookup: changing_lookup, rubygems_client: rubygems_client,
           closure_resolver: stub_closure(closure)
         )
@@ -231,7 +231,7 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
         unit = generator.generate['targets'].first['units'].find { |u| u['id'] == 'sqlite3' }
 
         expect(unit['artifact']).to eq(
-          'url'      => 'https://github.com/Lich5/Ruby4Lich5/releases/download/R4L5-gem-bundle-x64-mingw-ucrt/R4L5-gem-bundle-x64-mingw-ucrt.zip',
+          'url'      => 'https://github.com/elanthia-online/Ruby4Lich5/releases/download/R4L5-gem-bundle-x64-mingw-ucrt/R4L5-gem-bundle-x64-mingw-ucrt.zip',
           'filename' => 'R4L5-gem-bundle-x64-mingw-ucrt.zip',
           'sha256'   => bundle_asset[:sha256],
           'archive'  => 'zip'
@@ -305,7 +305,7 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
         closure = described_class::GTK3_STACK.map { |n| node(n, '4.3.6') }
         generator = described_class.new(
           root_names: described_class::GTK3_STACK, delivery_states_by_name: delivery_states, ruby_abi: '4.0',
-          platform: 'x64-mingw-ucrt', repo: 'Lich5/Ruby4Lich5', bundle_asset: bundle_asset.merge(sha256: stale_bundle_digest),
+          platform: 'x64-mingw-ucrt', repo: 'elanthia-online/Ruby4Lich5', bundle_asset: bundle_asset.merge(sha256: stale_bundle_digest),
           pkg_dir: @pkg_dir, native_digest_lookup: digest_lookup, rubygems_client: rubygems_client,
           closure_resolver: stub_closure(closure)
         )
@@ -329,14 +329,14 @@ RSpec.describe Ruby4Lich5::GemManifestGenerator do
         closure = described_class::GTK3_STACK.map { |n| node(n, '4.3.6') }
         generator = described_class.new(
           root_names: described_class::GTK3_STACK, delivery_states_by_name: delivery_states, ruby_abi: '4.0',
-          platform: 'x64-mingw-ucrt', repo: 'Lich5/Ruby4Lich5', bundle_asset: candidate_asset, pkg_dir: @pkg_dir,
+          platform: 'x64-mingw-ucrt', repo: 'elanthia-online/Ruby4Lich5', bundle_asset: candidate_asset, pkg_dir: @pkg_dir,
           native_digest_lookup: native_digest_lookup, rubygems_client: rubygems_client, closure_resolver: stub_closure(closure)
         )
 
         unit = generator.generate['targets'].first['units'].find { |u| u['id'] == 'gtk3-runtime' }
 
         expect(unit['artifact']['url']).to eq(
-          'https://github.com/Lich5/Ruby4Lich5/releases/download/R4L5-gem-bundle-x64-mingw-ucrt-candidate/R4L5-gem-bundle-x64-mingw-ucrt.zip'
+          'https://github.com/elanthia-online/Ruby4Lich5/releases/download/R4L5-gem-bundle-x64-mingw-ucrt-candidate/R4L5-gem-bundle-x64-mingw-ucrt.zip'
         )
       end
     end
